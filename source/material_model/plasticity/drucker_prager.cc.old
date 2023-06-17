@@ -1,0 +1,380 @@
+#include <elaspect/material_model/plasticity/drucker_prager.h>
+#include <elaspect/utilities.h>
+
+#include <deal.II/physics/elasticity/standard_tensors.h>
+
+namespace elaspect
+{
+  namespace MaterialModel
+  {
+    namespace Plasticity
+    {
+      template <int dim>
+      void
+      DruckerPrager<dim>::
+      apply_return_mapping(const MaterialModel::MaterialModelInputs<dim> &in,
+                           const unsigned int i,
+                           const std::vector<double> &volume_fractions,
+                           const MaterialUtilities::CompositionalAveragingOperation avg_scheme,
+                           const SymmetricTensor<4,dim> &elastic_modulus,
+                           const SymmetricTensor<2,dim> &trial_stress,
+                           StateUpdates<dim> &state_updates) const
+      {
+        const double xi_avg      = MaterialUtilities::average_value(volume_fractions, xi, avg_scheme);
+        const double eta_avg     = MaterialUtilities::average_value(volume_fractions, eta, avg_scheme);
+        const double eta_bar_avg = MaterialUtilities::average_value(volume_fractions, eta_bar, avg_scheme);
+        const double c0_avg      = MaterialUtilities::average_value(volume_fractions, c0, avg_scheme);
+
+        const SymmetricTensor<2,dim> s_tr = deviator(trial_stress);
+        const double sqrt_J2_tr = std::sqrt(std::fabs(second_invariant(s_tr)));
+        const double p_tr = trace(trial_stress) / dim;
+
+        const double epsilon_p_old = std::max(
+          in.qpd_cell->get_scalar(i, this->introspection().qpd_indicators.old_plastic_strain), 0.0);
+
+        // check plastic admissibility
+        std::pair<double, double> c_and_H = 
+          compute_hardening_modulus(c0_avg, epsilon_p_old);
+        double F = sqrt_J2_tr + eta_avg * p_tr - xi_avg * c_and_H.first;
+        if (F <= 0)
+        {
+          state_updates.stress         = trial_stress;
+          state_updates.flag           = 0;
+          state_updates.plastic_strain = epsilon_p_old;
+          return;
+        }
+
+        const double G = elastic_modulus[0][1][0][1];
+        const double K = elastic_modulus[0][0][1][1] + G * 2. / dim;
+
+        const double tol = 1.e-8;
+        const unsigned int iter_max = 3;
+
+        double epsilon_p = numbers::signaling_nan<double>();
+
+        // set initial guess for dgamma
+        double dgamma = 0;
+
+        // apply return mapping to smooth portion of cone
+        for (unsigned int iter = 0; iter < iter_max; ++iter)
+        {
+          double d = -G - K * eta_avg * eta_bar_avg - xi_avg * xi_avg * c_and_H.second;
+          AssertThrow(d < 0, ExcInternalError());
+          dgamma -= F / d;
+
+          // compute new residual
+          epsilon_p = epsilon_p_old + xi_avg * dgamma;
+          c_and_H = compute_hardening_modulus(c0_avg, epsilon_p);
+          F = sqrt_J2_tr - G * dgamma + eta_avg * (p_tr - K * eta_bar_avg * dgamma) - xi_avg * c_and_H.first;
+          if (std::abs(F) < tol * c_and_H.first)
+            break;
+        }
+
+        // check validity
+        if (sqrt_J2_tr - G * dgamma >= 0)
+        {
+          // smooth wall return is valid -- update stress and other variables
+          state_updates.stress = (1 - G * dgamma / sqrt_J2_tr) * s_tr;
+          const double p_new = p_tr - K * eta_bar_avg * dgamma;
+          for (unsigned int d = 0; d < dim; ++d)
+            state_updates.stress[d][d] += p_new;
+
+          state_updates.flag = dgamma;
+          state_updates.plastic_strain = epsilon_p;
+        }
+        else
+        {
+          // smooth wall return not valid -- return to apex
+          const double alpha = xi_avg / eta_bar_avg;
+          const double beta  = xi_avg / eta_avg;
+
+          // set initial guess for depsilon_vp
+          double depsilon_vp = 0;
+
+          c_and_H = compute_hardening_modulus(c0_avg, epsilon_p_old);
+          double res = beta * c_and_H.first - p_tr;
+
+          for (unsigned int iter = 0; iter < iter_max; ++iter)
+          {
+            double d = alpha * beta * c_and_H.second + K;
+            AssertThrow(d > 0, ExcInternalError());
+            depsilon_vp -= res / d;
+
+            // compute new residual
+            epsilon_p = epsilon_p_old + alpha * depsilon_vp;
+            c_and_H = compute_hardening_modulus(c0_avg, epsilon_p);
+            res = beta * c_and_H.first - (p_tr - K * depsilon_vp);
+            if (std::abs(res) < tol * c_and_H.first)
+              break;
+          }
+
+          // update stress and other variables
+          const double p_new = p_tr - K * depsilon_vp;
+          state_updates.stress = 0;
+          for (unsigned int d = 0; d < dim; ++d)
+            state_updates.stress[d][d] = p_new;
+
+          state_updates.flag = -1;
+          state_updates.plastic_strain = epsilon_p;
+        }
+      }
+
+
+      template <int dim>
+      void
+      DruckerPrager<dim>::
+      compute_tangent_modulus(const MaterialModel::MaterialModelInputs<dim> &in,
+                              const unsigned int i,
+                              const std::vector<double> &volume_fractions,
+                              const MaterialUtilities::CompositionalAveragingOperation avg_scheme,
+                              const SymmetricTensor<2,dim> &trial_elastic_strain,
+                              const SymmetricTensor<4,dim> &elastic_modulus,
+                              SymmetricTensor<4,dim> &tangent_modulus) const
+      {
+        const double flag      = in.qpd_cell->get_scalar(i, this->introspection().qpd_indicators.return_mapping_flag);
+        const double epsilon_p = in.qpd_cell->get_scalar(i, this->introspection().qpd_indicators.current_plastic_strain);
+
+        if (flag == 0)
+        {
+          tangent_modulus = elastic_modulus;
+          return;
+        }
+
+        const double eta_avg     = MaterialUtilities::average_value(volume_fractions, eta, avg_scheme);
+        const double eta_bar_avg = MaterialUtilities::average_value(volume_fractions, eta_bar, avg_scheme);
+        const double xi_avg      = MaterialUtilities::average_value(volume_fractions, xi, avg_scheme);
+        const double c0_avg      = MaterialUtilities::average_value(volume_fractions, c0, avg_scheme);
+
+        const std::pair<double, double> c_and_H = compute_hardening_modulus(c0_avg, epsilon_p);
+
+        const double G = elastic_modulus[0][1][0][1];
+        const double K = elastic_modulus[0][0][1][1] + G * 2. / dim;
+
+        if (flag == -1)
+        {
+          const double alpha = xi_avg / eta_bar_avg;
+          const double beta  = xi_avg / eta_avg;
+
+          tangent_modulus = (K * (1 - K / (K + alpha * beta * c_and_H.second))) *
+                            Physics::Elasticity::StandardTensors<dim>::IxI;
+        }
+        else
+        {
+          const double dgamma = flag;
+          AssertThrow(dgamma > 0,
+                      ExcMessage("The plastic multiplier is non-positive."));
+
+          const SymmetricTensor<2,dim> epsilon_d_tr = deviator(trial_elastic_strain);
+          const double epsilon_d_tr_norm = epsilon_d_tr.norm();
+          const SymmetricTensor<2,dim> D = epsilon_d_tr * (1. / epsilon_d_tr_norm);
+
+          const double A_inv = G + K * eta_avg * eta_bar_avg + xi_avg * xi_avg * c_and_H.second;
+          AssertThrow(A_inv > 0,
+                      ExcMessage("$G + K\\eta\\bar{\\eta} + \\xi^2H$ is non-positive."));
+
+          const double A = 1. / A_inv;
+          const double B = dgamma / (numbers::SQRT2 * epsilon_d_tr_norm);
+
+          tangent_modulus = (2. * G * (1. - B)) * Physics::Elasticity::StandardTensors<dim>::dev_P
+                            + (2. * G * (B - G * A)) * outer_product(D, D)
+                            - numbers::SQRT2 * G * A * K * 
+                              (outer_product(D, Physics::Elasticity::StandardTensors<dim>::I) * eta_avg +
+                               outer_product(Physics::Elasticity::StandardTensors<dim>::I, D) * eta_bar_avg)
+                            + (K * (1. - K * eta_avg * eta_bar_avg * A)) * 
+                              Physics::Elasticity::StandardTensors<dim>::IxI;
+        }
+      }
+
+
+      template <int dim>
+      std::pair<double, double>
+      DruckerPrager<dim>::
+      compute_hardening_modulus(const double reference_cohesion,
+                                const double plastic_strain) const
+      {
+        AssertThrow(plastic_strain >= 0, 
+                    ExcMessage("Plastic strain is negative."));
+
+        unsigned int stage = 0;
+        while (plastic_strain >= hardening_stages[stage])
+        {
+          ++stage;
+          if (stage == hardening_stages.size())
+            break;
+        }
+        Assert(stage > 0, ExcInternalError());
+
+        const double f = hardening_factors[stage - 1];
+        const double k = (stage == hardening_stages.size()
+                          ? 0 
+                          : (hardening_factors[stage] - hardening_factors[stage - 1])
+                            / (hardening_stages[stage] - hardening_stages[stage - 1]));
+
+        std::pair<double, double> c_and_H;
+        c_and_H.first  = reference_cohesion * (f + k * (plastic_strain - hardening_stages[stage - 1]));
+        c_and_H.second = reference_cohesion * k;
+
+        return c_and_H;
+      }
+
+
+      template <int dim>
+      void
+      DruckerPrager<dim>::declare_parameters (ParameterHandler &prm)
+      {
+        prm.enter_subsection ("Material model");
+        {
+          prm.enter_subsection ("Plasticity");
+          {
+            prm.enter_subsection ("Drucker Prager");
+            {
+              prm.declare_entry ("Cohesion", "1e6",
+                                 Patterns::List(Patterns::Double(0)),
+                                 "");
+
+              prm.declare_entry ("Friction angle", "30",
+                                 Patterns::List(Patterns::Double(0, 45)),
+                                 "");
+
+              prm.declare_entry ("Dilatancy angle", "30",
+                                 Patterns::List(Patterns::Double(0, 45)),
+                                 "");
+
+              prm.declare_entry ("Plastic strain hardening stages", "",
+                                 Patterns::Anything(),
+                                 "");
+
+              prm.declare_entry ("Plastic strain hardening factors", "",
+                                 Patterns::Anything(),
+                                 "");
+
+              prm.declare_entry ("Use compression cone", "true",
+                                 Patterns::Bool(),
+                                 "");
+            }
+            prm.leave_subsection ();
+          }
+          prm.leave_subsection ();
+        }
+        prm.leave_subsection ();
+      }
+
+
+      template <int dim>
+      void
+      DruckerPrager<dim>::parse_parameters (ParameterHandler &prm)
+      {
+        prm.enter_subsection ("Material model");
+        {
+          prm.enter_subsection ("Plasticity");
+          {
+            prm.enter_subsection ("Drucker Prager");
+            {
+              const unsigned int n_fields = this->n_compositional_fields() + 1;
+              eta.resize (n_fields);
+              eta_bar.resize (n_fields);
+              xi.resize (n_fields);
+
+              std::vector<double> phi, psi;
+              c0 = Utilities::possibly_extend_from_1_to_N (
+                Utilities::string_to_double(Utilities::split_string_list(prm.get("Cohesion"))),
+                n_fields,
+                "Cohesion");
+              phi = Utilities::possibly_extend_from_1_to_N (
+                Utilities::string_to_double(Utilities::split_string_list(prm.get("Friction angle"))),
+                n_fields,
+                "Friction angle");
+              psi = Utilities::possibly_extend_from_1_to_N (
+                Utilities::string_to_double(Utilities::split_string_list(prm.get("Dilatancy angle"))),
+                n_fields,
+                "Dilatancy angle"); 
+
+              for (unsigned int field = 0; field < n_fields; ++field)
+              {
+                AssertThrow(phi[field] > 0, 
+                                ExcMessage("The Drucker Prager model requires the friction angle to be greater than zero."));
+                AssertThrow(psi[field] > 0, 
+                                ExcMessage("The Drucker Prager model requires the dilatancy angle to be greater than zero."));
+              }
+
+              hardening_stages  = Utilities::string_to_double(Utilities::split_string_list(prm.get("Plastic strain hardening stages")));
+              hardening_factors = Utilities::string_to_double(Utilities::split_string_list(prm.get("Plastic strain hardening factors")));
+
+              AssertThrow(hardening_stages.size() == hardening_factors.size(),
+                          ExcMessage("The sizes of <Plastic strain hardening stages> and "
+                                     "<Plastic strain hardening factors> should be the same."));
+
+              for (unsigned int i = 0; i < hardening_stages.size(); ++i)
+              {
+                AssertThrow(hardening_stages[i] >= 0,
+                            ExcMessage("The hardening stages should be non-nagative."));
+                AssertThrow(hardening_factors[i] > 0,
+                            ExcMessage("The hardening factors should be positive."));
+
+                if (i > 0)
+                {
+                  AssertThrow(hardening_stages[i] > hardening_stages[i-1],
+                              ExcMessage("The hardening stage list should be monotonically increasing."));
+                }
+              }
+
+              hardening_stages.insert(hardening_stages.begin(), 0);
+              hardening_factors.insert(hardening_factors.begin(), 1);
+
+              const bool use_compression_cone = prm.get_bool ("Use compression cone");
+
+              for (unsigned int i = 0; i < n_fields; ++i)
+              {
+                phi[i] *= numbers::PI / 180.;
+                psi[i] *= numbers::PI / 180.;
+
+                if (dim == 2)
+                {
+                  eta[i]     = std::sin(phi[i]);
+                  eta_bar[i] = std::sin(psi[i]);
+                  xi[i]      = std::cos(phi[i]);
+                }
+                else
+                {
+                  double factor1, factor2;
+                  if (use_compression_cone)
+                  {
+                    factor1 = 1. / (std::sqrt(3.) * (3 - std::sin(phi[i])));
+                    factor2 = 1. / (std::sqrt(3.) * (3 - std::sin(psi[i])));
+                  }
+                  else
+                  {
+                    factor1 = 1. / (std::sqrt(3.) * (3 + std::sin(phi[i])));
+                    factor2 = 1. / (std::sqrt(3.) * (3 + std::sin(psi[i])));
+                  }
+
+                  eta[i]     = (6 * std::sin(phi[i])) * factor1; 
+                  eta_bar[i] = (6 * std::sin(psi[i])) * factor2; 
+                  xi[i]      = (6 * std::cos(phi[i])) * factor1;
+                }
+              }
+            }
+            prm.leave_subsection ();
+          }
+          prm.leave_subsection ();
+        }
+        prm.leave_subsection ();
+      }
+    }
+  }
+}
+
+
+// explicit instantiations
+namespace elaspect
+{
+  namespace MaterialModel
+  {
+    namespace Plasticity
+    {
+      ELASPECT_REGISTER_PLASTICITY_MODEL(DruckerPrager,
+                                     "drucker prager",
+                                     "")
+    }
+  }
+}

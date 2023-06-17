@@ -1,0 +1,134 @@
+set Dimension                               = 2
+set Output directory                        = output_test4
+set Use years in output instead of seconds  = false
+set End time                                = 200e10
+set Timing output frequency                 = 5
+
+
+subsection Geometry model
+  set Model name = box
+
+  subsection Box
+    set Box origin X coordinate = -2e3
+    set Box origin Y coordinate = -1e3
+    set X extent = 4e3
+    set Y extent = 2e3
+    set X repetitions = 50
+    set Y repetitions = 25
+  end
+end
+
+
+subsection Compositional fields
+  set Number of fields = 1
+  set Names of fields = inclusion
+end
+
+
+subsection Initial composition model
+  set Model name = function
+  
+  subsection Function
+    set Variable names = x, y
+    set Function expression = if(x*x + y*y < 1e4, 1, 0)
+  end
+end
+
+
+subsection Material model
+  set Constitutive relation = elasticity, viscosity, plasticity
+  set Rheological parameters averaging scheme = maximum composition
+
+  subsection Basic properties
+    set Model name = simple
+
+    subsection Simple model
+      set Young's moduli  = 2.5714e10, 0.72e10
+      set Poisson's ratio = 0.2857,    0.44
+    end
+  end
+
+  subsection Viscosity
+    set Model name = simple
+
+    subsection Simple model
+      set Viscosity = 2.5e21, 1e17
+    end
+  end
+
+  subsection Plasticity
+    set Model name = drucker prager
+
+    subsection Drucker Prager
+      set Cohesion        = 3e7
+      set Friction angle  = 30
+      set Dilatancy angle = 10
+      set Plastic damper viscosity = 2e18
+    end
+  end
+end
+
+
+subsection Gravity model
+  set Model name = vertical
+
+  subsection Vertical
+    set Magnitude = 0
+  end
+end
+
+
+subsection Boundary velocity model
+  set Prescribed velocity boundary indicators = left   x : function, \
+                                                right  x : function, \
+                                                bottom y : function, \
+                                                top    y : function
+
+  subsection Function
+    set Variable names = x, y
+    set Function constants = v_x=1e-11, v_y=5e-12
+    set Function expression = if(x<0, v_x, -v_x); if(y<0, -v_y, v_y)
+  end
+end
+
+
+subsection Discretization
+  set Displacement polynomial degree          = 2
+  set Number of Gaussian points per dimension = 3
+end
+
+
+subsection Mesh refinement
+  set Initial global refinement = 2
+  set Time steps between mesh refinement = 0
+end
+
+
+subsection Solver parameters
+  subsection Solid system
+    set Maximum nonlinear iterations = 50
+    set Nonlinear solver tolerance   = 1e-6
+    set Linear solver scheme         = MUMPS
+    set Maximum line search steps    = 10
+  end
+end
+
+
+subsection Time stepping
+  set First time step size = 1e10
+  set List of model names = function
+
+  subsection Function
+    set Function expression = 1e10
+  end
+end
+
+
+subsection Postprocess
+  set List of postprocessors = stress statistics, visualization
+  
+  subsection Visualization
+    set List of output variables = strain rate
+    set Time between graphical output = 5e10
+  end
+end

@@ -1,0 +1,27 @@
+FIND_PACKAGE(deal.II 9.0.0 QUIET REQUIRED HINTS @DEAL_II_PATH@)
+SET(elAspect_INCLUDE_DIRS "@CONFIG_INCLUDE_DIRS@")
+SET(elAspect_VERSION "@ELASPECT_PACKAGE_VERSION@")
+SET(elAspect_DIR "@CONFIG_DIR@")
+# force our build type to the one that is used by elASPECT:
+SET(CMAKE_BUILD_TYPE "@CMAKE_BUILD_TYPE@" CACHE STRING "select debug or release mode" FORCE)
+
+MACRO(ELASPECT_SETUP_PLUGIN _target)
+  MESSAGE(STATUS "Setting up plugin:")
+  MESSAGE(STATUS "  name <${_target}>")
+  MESSAGE(STATUS "  using ELASPECT_DIR ${elAspect_DIR}")
+  MESSAGE(STATUS "  in @CMAKE_BUILD_TYPE@ mode")
+
+  DEAL_II_SETUP_TARGET(${_target})
+  SET_PROPERTY(TARGET ${_target} APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${elAspect_INCLUDE_DIRS}"
+  )
+
+  # export ELASPECT_SOURCE_DIR as compile definition
+  TARGET_COMPILE_DEFINITIONS( ${_target} PRIVATE ELASPECT_SOURCE_DIR="@CMAKE_SOURCE_DIR@" )
+
+  # automatically create a symbolic link to luna in the current directory:
+  ADD_CUSTOM_COMMAND(
+    TARGET ${_target} POST_BUILD
+    COMMAND ln -sf ${elAspect_DIR}/luna .)
+
+ENDMACRO()

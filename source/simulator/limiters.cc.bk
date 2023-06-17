@@ -1,0 +1,2477 @@
+#include <aspect/simulator.h>
+
+#include <deal.II/grid/grid_tools.h>
+#include <deal.II/fe/fe_dgq.h>
+
+namespace aspect
+{
+  namespace internal
+  {
+    /**
+     * A structure that stores the values for computing the KXRCF indicator
+     * of a cell. We need this structure because the KXRCF indicator 
+     * requires the jump of field values across cell faces that cannot be 
+     * computed cell-by-cell, so that the data must be stored during the
+     * computation.
+     */
+    struct KXRCFCellData
+    {
+      /**
+       * An array that stores the maximum norm for each field.
+       */
+      std::vector<double> max_norms;
+
+      /**
+       * An array that stores the face jumps for each field.
+       */
+      std::vector<double> face_jumps;
+
+      /**
+       * Constructor. Initialize the data vectors with zero.
+       */
+      KXRCFCellData(const unsigned int n_fields)
+        : max_norms(n_fields, 0.0)
+        , face_jumps(n_fields, 0.0)
+      {}
+    };
+
+
+    /**
+     * A structure that represents an element in WENO stencil. The structure
+     * consists of a cell iterator and an integer. The cell iterator points to 
+     * the coarse cell that the element belongs to, while the integer 
+     * indicates which subcell the element is relevant to the coarse cell.
+     *
+     * TODO: explaination
+     */
+    template <int dim>
+    struct WENOElement
+    {
+      /**
+       * A cell iterator that points to the coarse cell that the element
+       * belongs to. In case 1 and 3 the cell is active, while in case 2
+       * the cell has children.
+       */
+      typename DoFHandler<dim>::cell_iterator coarse_cell;
+
+      /**
+       * An integer that indicates which subcell the element is relevant
+       * to the coarse cell. In case 1 the number corresponds to a subcell,
+       * while in case 2 and 3 the number corresponds to a child cell.
+       */
+      unsigned int subcell_id;
+
+      /**
+       * Default constructor. Initialize the coarse cell and the subcell 
+       * indicator with invalid values.
+       */
+      WENOElement();
+
+      /**
+       * Reinitialize the cell iterator and the subcell indicator.
+       */
+      void reinit(const typename DoFHandler<dim>::cell_iterator &cell,
+                  const unsigned int indicator);
+    };
+
+
+    template <int dim>
+    WENOElement<dim>::WENOElement()
+      : coarse_cell()
+      , subcell_id(numbers::invalid_unsigned_int)
+    {}
+
+
+    template <int dim>
+    void WENOElement<dim>::
+    reinit(const typename DoFHandler<dim>::cell_iterator &cell,
+           const unsigned int indicator)
+    {
+      Assert(indicator < GeometryInfo<dim>::max_children_per_cell
+             || indicator == numbers::invalid_unsigned_int,
+             ExcInternalError());
+
+      coarse_cell = cell;
+      subcell_id  = indicator;
+    }
+
+
+    /**
+     */
+    template <int dim>
+    class WENOReconstructor
+    {
+      public:
+        /**
+         * Number of substencils (ENO stencils) in WENO stencil.
+         */
+        static constexpr unsigned int n_substencils = 1 << dim;
+
+        /**
+         *  Number of stencil in WENO stencil.
+         */
+        static constexpr unsigned int elements_per_stencil = pow(3, dim);
+
+        /**
+         * Number of stencil in each substencil.
+         */
+        static constexpr unsigned int elements_per_substencil = 1 << dim;
+
+        /**
+         * Dimension of bi/tri-quadratic polynomial space.
+         */
+        static constexpr unsigned int p2_space_dimension = pow(3, dim);
+
+        /**
+         * Dimension of bi/tri-quadratic polynomial space.
+         */
+        static constexpr unsigned int p1_space_dimension = 1 << dim;
+
+        /**
+         * Number of Gaussian quadrature points for reconstruction.
+         */
+        static constexpr unsigned int n_quadrature_points = 1 << dim;
+
+        /**
+         * Default constructor. Initialize the auxiliary matrices and vectors.
+         */
+        WENOReconstructor();
+
+        /**
+         * Some of the auxiliary matrices and vectors (e.g., basis_integrals and
+         * substencil_basis_integrals) are only dependent on the mesh geometry. 
+         * This function precompute these values before the actual reconstruction
+         * for different fields to avoid duplicate calculation.
+         *
+         * @param integrals Integrals of the quadratic polynomial basis in each 
+         *        element of the stencil.
+         * @param values Values of the quadratic polynomial basis at quadrature 
+         *        points of the target cell.
+         */
+        void 
+        prepare_for_polynomial_reconstruction(const std::vector<std::vector<double>> &integrals,
+                                              const std::vector<std::vector<double>> &values,
+                                              const std::set<unsigned int> &invalid_substencils = std::set<unsigned int>());
+
+        /**
+         *
+         */
+        void
+        execute_polynomial_reconstruction(const std::vector<double>    &field_integrals,
+                                          std::vector<double>          &reconstructed_values);
+
+        /**
+         * Compute the values of monomial basis of quadratic polynomial at a certain point.
+         */
+        static 
+        void
+        compute_p2_basis_values(const Point<dim>    &point,
+                                std::vector<double> &values);
+
+        /**
+         * 
+         */
+        static
+        unsigned int
+        p1_to_p2_basis(const unsigned int nth_basis_in_p1);
+
+        /**
+         *
+         */
+        static
+        unsigned int
+        element_in_substencil(const unsigned int nth_substencil,
+                              const unsigned int nth_element_in_substencil);
+
+      private:
+        /**
+         *
+         */
+        double
+        compute_smoothness_indicator(const unsigned int nth_substencil) const;
+
+        /**
+         * A matrix that stores the integrals of monomial basis of quadratic polynomial.
+         * The (i, j) entry of the matrix is the integral of the j-th monomial basis 
+         * in the i-th element of the stencil.
+         */
+        FullMatrix<double> basis_integrals;
+
+        FullMatrix<double> basis_integrals_inv;
+
+        /**
+         * A vector that stores the field integrals in each element.
+         */
+        Vector<double> field_integrals;
+
+        /**
+         * An array of matrices that stores the integrals of monomial basis of linear
+         * polynomials in each substencil. The (i, j) entry of the k-th matrix is the
+         * integral of the j-th monomial basis in the i-th element of the k-th 
+         * substencil.
+         */
+        std::vector<FullMatrix<double>> substencil_basis_integrals_inv;
+
+        /**
+         * An array of vectors that stores the field integrals in each element
+         * for each substencil.
+         */
+        std::vector<Vector<double>> substencil_field_integrals;
+
+        /**
+         * Coefficients of the quadratic polynomial.
+         */
+        Vector<double> p2_coefficients;
+
+        /**
+         * Coefficients of the linear polynomial for each substencil.
+         */
+        std::vector<Vector<double>> p1_coefficients;
+
+        /**
+         * An array that stores the quadrature points of the target cell.
+         */
+        std::vector<Point<dim>> quadrature_points;
+
+        /**
+         * An auxiliary vector that stores the values of monomial basis of
+         * the quadratic polynomial at quadrature points in the target cell.
+         */
+        std::vector<Vector<double>> p2_basis_values;
+
+        /**
+         * An auxiliary vector that stores the values of monomial basis of a 
+         * linear polynomial at quadrature points in the target cell.
+         */
+        std::vector<Vector<double>> p1_basis_values;
+
+        /**
+         * A vector that stores values of the quadratic polynomial at 
+         * quadrature points of the target cell.
+         */
+        Vector<double> p2_values;
+
+        /**
+         * A matrix that stores values of the linear polynomials at quadrature 
+         * points of the target cell. The (i, j) entry of the matrix is the 
+         * value of the linear polynomial of the j-th substencil at the i-th
+         * quadrature point.
+         */
+        FullMatrix<double> p1_values;
+
+        FullMatrix<double> p1_values_inv;
+
+        /**
+         * The linear weight of each substencil.
+         */
+        Vector<double> linear_weights;
+
+        /**
+         * The smoothness indicator of each substencil.
+         */
+        std::vector<double> smoothness_indicators;
+
+        /**
+         * The nonlinear weight of each substencil.
+         */
+        std::vector<double> nonlinear_weights;
+
+        std::set<unsigned int> invalid_substencils;
+    };
+
+
+    template <int dim>
+    WENOReconstructor<dim>::WENOReconstructor()
+      : 
+      basis_integrals(elements_per_stencil, p2_space_dimension),
+      basis_integrals_inv(p2_space_dimension, p2_space_dimension),
+      field_integrals(elements_per_stencil),
+      substencil_basis_integrals_inv(n_substencils,
+                                     FullMatrix<double>(elements_per_substencil, 
+                                                        p1_space_dimension)),
+      substencil_field_integrals(n_substencils,
+                                 Vector<double>(elements_per_substencil)),
+      p2_coefficients(p2_space_dimension),
+      p1_coefficients(n_substencils, Vector<double>(p1_space_dimension)),
+      quadrature_points(n_quadrature_points),
+      p2_basis_values(n_quadrature_points, Vector<double>(p2_space_dimension)),
+      p1_basis_values(n_quadrature_points, Vector<double>(p1_space_dimension)),
+      p2_values(n_quadrature_points),
+      p1_values(n_quadrature_points, n_substencils),
+      p1_values_inv(n_substencils, n_substencils),
+      linear_weights(n_substencils),
+      smoothness_indicators(n_substencils),
+      nonlinear_weights(n_substencils)
+    {}
+
+
+
+    template <int dim>
+    void
+    WENOReconstructor<dim>::
+    prepare_for_polynomial_reconstruction(const std::vector<std::vector<double>> &basis_integrals_,
+                                          const std::vector<std::vector<double>> &basis_values_,
+                                          const std::set<unsigned int> &invalid_substencils_)
+    {
+      AssertDimension(basis_integrals_.size(), elements_per_stencil);
+      AssertDimension(basis_values_.size(), n_quadrature_points);
+
+      invalid_substencils = invalid_substencils_;
+
+      // Reinitialize the matrix storing p2 basis integrals.
+      for (unsigned int i = 0; i < elements_per_stencil; ++i)
+      {
+        AssertDimension(basis_integrals_[i].size(), p2_space_dimension);
+        for (unsigned int j = 0; j < p2_space_dimension; ++j)
+          basis_integrals(i, j) = basis_integrals_[i][j];
+      }
+
+      if (invalid_substencils.size() == 0)
+        basis_integrals_inv.invert(basis_integrals);
+
+      // Extract the p1 basis integrals for valid substencils.
+      for (unsigned int i = 0; i < n_substencils; ++i)
+        if (invalid_substencils.find(i) == invalid_substencils.end())
+        {
+          for (unsigned int j = 0; j < elements_per_substencil; ++j)
+            for (unsigned int k = 0; k < p1_space_dimension; ++k)
+            {
+              const unsigned int element = element_in_substencil(i, j),
+                                 basis   = p1_to_p2_basis(k);
+              substencil_basis_integrals_inv[i](j, k) = basis_integrals_[element][basis];
+            }
+
+          substencil_basis_integrals_inv[i].gauss_jordan();
+        }
+
+      // Reinitialize the basis values in target cell.
+      for (unsigned int q = 0; q < n_quadrature_points; ++q)
+      {
+        AssertDimension(basis_values_[q].size(), p2_space_dimension);
+        for (unsigned int j = 0; j < p2_space_dimension; ++j)
+          p2_basis_values[q](j) = basis_values_[q][j];
+
+        // Extract the p1 basis values in target cell.
+        for (unsigned int j = 0; j < p1_space_dimension; ++j)
+          p1_basis_values[q](j) = basis_values_[q][p1_to_p2_basis(j)];
+      }
+    }
+
+
+    template <int dim>
+    void
+    WENOReconstructor<dim>::
+    execute_polynomial_reconstruction(const std::vector<double>    &integrals,
+                                      std::vector<double>          &reconstructed_values)
+    {
+      AssertDimension(integrals.size(), elements_per_stencil);
+
+      // Copy the field integrals into the vector entries.
+      for (unsigned int i = 0; i < elements_per_stencil; ++i)
+        field_integrals(i) = integrals[i];
+
+      if (invalid_substencils.size() > 0)
+      {
+        // When there are invalid substencils (i.e., the target cell is at boundary),
+        // we simply select the substencil with the smallest smoothness indicator
+        // (known as ENO stencil) for polynomial reconstruction.
+        double min_beta = std::numeric_limits<double>::max();
+        unsigned int eno_stencil = numbers::invalid_unsigned_int;
+
+        for (unsigned int i = 0; i < n_substencils; ++i)
+          if (invalid_substencils.find(i) == invalid_substencils.end())
+          {
+            // Construct a linear polynomial that keeps cell average in
+            // substencil elements.
+            for (unsigned int j = 0; j < elements_per_substencil; ++j)
+              substencil_field_integrals[i](j) = field_integrals(element_in_substencil(i, j));
+
+            substencil_basis_integrals_inv[i].vmult(p1_coefficients[i], substencil_field_integrals[i]);
+
+            // Compute the smoothness indicator.
+            const double beta = compute_smoothness_indicator(i);
+            if (beta < min_beta)
+            {
+              min_beta = beta;
+              eno_stencil = i;
+            }
+          }
+
+        // The linear polynomial in the ENO stencil is the final reconstructed polynomial.
+        for (unsigned int q = 0; q < n_quadrature_points; ++q)
+          reconstructed_values[q] = p1_coefficients[eno_stencil] * p1_basis_values[q];
+      }
+
+      else
+      {
+        // Construct a quadratic polynomial that keeps cell average in each stencil element.
+        basis_integrals_inv.vmult(p2_coefficients, field_integrals);
+
+        // Construct a linear polynomial for each substencil that keeps cell average in 
+        // each substencil element.
+        for (unsigned int i = 0; i < n_substencils; ++i)
+        {
+          for (unsigned int j = 0; j < elements_per_substencil; ++j)
+            substencil_field_integrals[i](j) = field_integrals(element_in_substencil(i, j));
+
+          substencil_basis_integrals_inv[i].vmult(p1_coefficients[i], substencil_field_integrals[i]);
+        }
+
+        std::cout << "field_integrals: " << std::endl;
+        for (unsigned int i = 0; i < n_substencils; ++i)
+        {
+          for (unsigned int j = 0; j < elements_per_substencil; ++j)
+            std::cout << substencil_field_integrals[i](j) << ' ';
+          std::cout << std::endl;
+        }
+
+        std::cout << "P1 coefficients: " << std::endl;
+        for (unsigned int i = 0; i < n_substencils; ++i)
+        {
+          for (unsigned int j = 0; j < p1_space_dimension; ++j)
+            std::cout << p1_coefficients[i](j) << ' ';
+          std::cout << std::endl;
+        }
+
+        // Compute the values of linear polynomials and the quadratic polynomial
+        // at quadrature points of the target cell.
+        for (unsigned int q = 0; q < n_quadrature_points; ++q)
+        {
+          p2_values(q) = p2_coefficients * p2_basis_values[q];
+          for (unsigned int i = 0; i < n_substencils; ++i)
+            p1_values(q, i) = p1_coefficients[i] * p1_basis_values[q];
+        }
+
+        std::cout << "P2 values: " << std::endl;
+        for (unsigned int q = 0; q < n_quadrature_points; ++q)
+          std::cout << p2_values(q) << ' ';
+        std::cout << std::endl;
+
+        std::cout << "P1 values: " << std::endl;
+        for (unsigned int i = 0; i < n_substencils; ++i)
+        {
+          for (unsigned int q = 0; q < n_quadrature_points; ++q)
+            std::cout << p1_values(q, i) << ' ';
+          std::cout << std::endl;
+        }
+
+        // Compute the linear weight of each substencil.
+        // TODO
+        p1_values_inv.invert(p1_values);
+        std::cout << "p1_values_inv: " << std::endl;
+        p1_values_inv.print_formatted(std::cout);
+        if (std::isinf(p1_values_inv(0, 0)))
+          linear_weights = 1.0 / n_substencils;
+        else
+          p1_values_inv.vmult(linear_weights, p2_values);
+
+        std::cout << "linear weights: " << std::endl;
+        for (unsigned int i = 0; i < n_substencils; ++i)
+        {
+          std::cout << linear_weights[i] << ' ';
+          if (linear_weights[i] < 0)
+            std::cout << "(OUCH!!!) ";
+        }
+        std::cout << std::endl;
+
+        // Compute the nonlinear weight of each substencil.
+        // TODO
+        const double epsilon = 1e-20;
+        for (unsigned int i = 0; i < n_substencils; ++i)
+        {
+          const double beta = compute_smoothness_indicator(i);
+          nonlinear_weights[i] = linear_weights[i] / 
+                                 (Utilities::fixed_power<2,double>(beta) + epsilon);
+        }
+
+        // Normalize the nonlinear weights.
+        const double sum = std::accumulate(nonlinear_weights.begin(), 
+                                           nonlinear_weights.end(), 
+                                           0.0);
+
+        for (unsigned int i = 0; i < n_substencils; ++i)
+          nonlinear_weights[i] /= sum;
+
+        // Compute the values of the reconstructed polynomial at quadrature points.
+        std::fill(reconstructed_values.begin(), reconstructed_values.end(), 0.0);
+        for (unsigned int q = 0; q < n_quadrature_points; ++q)
+          for (unsigned int i = 0; i < n_substencils; ++i)
+            reconstructed_values[q] += nonlinear_weights[i] * p1_values(q, i);
+
+        std::cout << "reconstructed values: " << std::endl;
+        for (unsigned int q = 0; q < n_quadrature_points; ++q)
+          std::cout << reconstructed_values[q] << ' ';
+        std::cout << std::endl << std::endl;
+      }
+    }
+
+
+    template <>
+    void
+    WENOReconstructor<2>::
+    compute_p2_basis_values(const Point<2>      &point,
+                            std::vector<double> &values)
+    {
+      AssertDimension(values.size(), 9);
+
+      const double x = point[0], y = point[1];
+      values[0] = 1;
+      values[1] = x;
+      values[2] = y;
+      values[3] = x * y;
+      values[4] = x * x;
+      values[5] = y * y;
+      values[6] = values[4] * y;            // xxy
+      values[7] = values[5] * x;            // xyy
+      values[8] = values[4] * values[5];    // xxyy
+    }
+
+
+    template <>
+    void
+    WENOReconstructor<3>::
+    compute_p2_basis_values(const Point<3>      &point,
+                            std::vector<double> &values)
+    {
+      AssertDimension(values.size(), 27);
+
+      const double x = point[0], y = point[1], z = point[2];
+      values[ 0] = 1;
+      values[ 1] = x;
+      values[ 2] = y;
+      values[ 3] = z;
+      values[ 4] = y * z;
+      values[ 5] = z * x;
+      values[ 6] = x * y;
+      values[ 7] = x * x;
+      values[ 8] = y * y;
+      values[ 9] = z * z;
+      values[10] = values[ 4] * x;          // xyz
+      values[11] = values[ 7] * y;          // xxy
+      values[12] = values[ 7] * z;          // xxz
+      values[13] = values[ 8] * z;          // yyz
+      values[14] = values[ 8] * x;          // yyx
+      values[15] = values[ 9] * x;          // zzx
+      values[16] = values[ 9] * y;          // zzy
+      values[17] = values[ 7] * values[ 4]; // xxyz
+      values[18] = values[ 8] * values[ 5]; // yyzx
+      values[19] = values[ 9] * values[ 6]; // zzxy
+      values[20] = values[ 8] * values[ 9]; // yyzz
+      values[21] = values[ 9] * values[ 7]; // zzxx
+      values[22] = values[ 7] * values[ 8]; // xxyy
+      values[23] = values[20] * x;          // xyyzz
+      values[24] = values[21] * y;          // yzzxx
+      values[25] = values[22] * z;          // zxxyy
+      values[26] = values[22] * values[ 9]; // xxyyzz
+    }
+
+
+    template <>
+    unsigned int
+    WENOReconstructor<2>::p1_to_p2_basis(const unsigned int nth_basis_in_p1)
+    {
+      static const unsigned int lookup_table[4]
+        = { /*1*/0, /*x*/1, /*y*/2, /*xy*/3 };
+
+      AssertIndexRange(nth_basis_in_p1, 4);
+      return lookup_table[nth_basis_in_p1];
+    }
+
+
+    template <>
+    unsigned int
+    WENOReconstructor<3>::p1_to_p2_basis(const unsigned int nth_basis_in_p1)
+    {
+      static const unsigned int lookup_table[8]
+        = { /*1*/0, /*x*/1, /*y*/2, /*z*/3, /*yz*/4, /*zx*/5, /*xy*/6, /*xyz*/10 };
+
+      AssertIndexRange(nth_basis_in_p1, 8);
+      return lookup_table[nth_basis_in_p1];
+    }
+
+
+    template <>
+    unsigned int
+    WENOReconstructor<2>::
+    element_in_substencil(const unsigned int nth_substencil,
+                          const unsigned int nth_element_in_substencil)
+    {
+
+      static const unsigned int lookup_table[4][4]
+        = { { 0, 1, 3, 4 },
+            { 1, 2, 4, 5 },
+            { 3, 4, 6, 7 },
+            { 4, 5, 7, 8 } 
+          };
+
+      AssertIndexRange(nth_substencil, 4);
+      AssertIndexRange(nth_element_in_substencil, 4);
+
+      return lookup_table[nth_substencil][nth_element_in_substencil];
+    }
+
+
+    template <>
+    unsigned int
+    WENOReconstructor<3>::
+    element_in_substencil(const unsigned int nth_substencil,
+                          const unsigned int nth_element_in_substencil)
+    {
+      static const unsigned int lookup_table[8][8] 
+        = { {  0,  1,  3,  4,  9, 10, 12, 13 },
+            {  1,  2,  4,  5, 10, 11, 13, 14 },
+            {  3,  4,  6,  7, 12, 13, 15, 16 },
+            {  4,  5,  7,  8, 13, 14, 16, 17 },
+            {  9, 10, 12, 13, 18, 19, 21, 22 },
+            { 10, 11, 13, 14, 19, 20, 22, 23 },
+            { 12, 13, 15, 16, 21, 22, 24, 25 },
+            { 13, 14, 16, 17, 22, 23, 25, 26 }
+          };
+
+      AssertIndexRange(nth_substencil, 8);
+      AssertIndexRange(nth_element_in_substencil, 8);
+
+      return lookup_table[nth_substencil][nth_element_in_substencil];
+    }
+
+
+    template <>
+    double 
+    WENOReconstructor<2>::
+    compute_smoothness_indicator(const unsigned int nth_substencil) const 
+    {
+      // Use the basis integrals precomputed. The target cell is the 4th element
+      // of WENO stencil.
+      const auto &integrals = basis_integrals[4];
+
+      // coefficients of the linear polynomial in the present substencil
+      const Vector<double> &c = p1_coefficients[nth_substencil];
+
+      double beta = c[1] * c[1] * integrals[0] +        // c1*c1
+                    c[3] * c[3] * integrals[5] +        // c3*c3*y*y
+                    c[1] * c[3] * integrals[2] * 2      // 2*c1*c3*y
+                    +
+                    c[2] * c[2] * integrals[0] +        // c2*c2
+                    c[3] * c[3] * integrals[4] +        // c3*c3*x*x
+                    c[2] * c[3] * integrals[1] * 2;     // 2*c2*c3*x
+
+      return beta;
+    }
+
+
+    template <>
+    double
+    WENOReconstructor<3>::
+    compute_smoothness_indicator(const unsigned int nth_substencil) const
+    {
+      // Use the basis integrals precomputed. The target cell is the 13th element
+      // of WENO stencil.
+      const auto &integrals = basis_integrals[13];
+
+      // coefficients of the linear polynomial in the present substencil
+      const Vector<double> &c = p1_coefficients[nth_substencil];
+
+      double beta = c[1] * c[1] * integrals[ 0] +         // c1*c1
+                    c[5] * c[5] * integrals[ 9] +         // c5*c5*z*z
+                    c[6] * c[6] * integrals[ 8] +         // c6*c6*y*y
+                    c[7] * c[7] * integrals[20] +         // c7*c7*y*y*z*z
+                    c[1] * c[5] * integrals[ 3] * 2 +     // 2*c1*c5*z
+                    c[1] * c[6] * integrals[ 2] * 2 +     // 2*c1*c6*y
+                    c[1] * c[7] * integrals[ 4] * 2 +     // 2*c1*c7*y*z
+                    c[5] * c[6] * integrals[ 4] * 2 +     // 2*c5*c6*y*z
+                    c[5] * c[7] * integrals[16] * 2 +     // 2*c5*c7*y*z*z
+                    c[6] * c[7] * integrals[13] * 2       // 2*c6*c7*y*y*z
+                    +
+                    c[2] * c[2] * integrals[ 0] +         // c2*c2
+                    c[4] * c[4] * integrals[ 9] +         // c4*c4*z*z
+                    c[6] * c[6] * integrals[ 7] +         // c6*c6*x*x
+                    c[7] * c[7] * integrals[21] +         // c7*c7*x*x*z*z
+                    c[2] * c[4] * integrals[ 3] * 2 +     // 2*c2*c4*z
+                    c[2] * c[6] * integrals[ 1] * 2 +     // 2*c2*c6*x
+                    c[2] * c[7] * integrals[ 5] * 2 +     // 2*c2*c7*x*z
+                    c[4] * c[6] * integrals[ 5] * 2 +     // 2*c4*c6*x*z
+                    c[4] * c[7] * integrals[15] * 2 +     // 2*c4*c7*x*z*z
+                    c[6] * c[7] * integrals[12] * 2       // 2*c6*c7*x*x*z
+                    +
+                    c[3] * c[3] * integrals[ 0] +         // c3*c3
+                    c[4] * c[4] * integrals[ 8] +         // c4*c4*y*y
+                    c[5] * c[5] * integrals[ 7] +         // c5*c5*x*x
+                    c[7] * c[7] * integrals[22] +         // c7*c7*x*x*y*y
+                    c[3] * c[4] * integrals[ 2] * 2 +     // 2*c3*c4*y
+                    c[3] * c[5] * integrals[ 1] * 2 +     // 2*c3*c5*x
+                    c[3] * c[7] * integrals[ 6] * 2 +     // 2*c3*c7*x*y
+                    c[4] * c[5] * integrals[ 6] * 2 +     // 2*c4*c5*x*y
+                    c[4] * c[7] * integrals[14] * 2 +     // 2*c4*c7*x*y*y
+                    c[5] * c[7] * integrals[11] * 2;      // 2*c5*c7*x*x*y
+
+      return beta;
+    }
+
+
+    /**
+     * A helper function that assembles the WENO stencil for a target cell.
+     */
+    void
+    assemble_weno_stencil(const DoFHandler<2>::active_cell_iterator &cell,
+                          std::vector<WENOElement<2>>               &stencil)
+    {
+      AssertDimension(stencil.size(), 9);
+
+      // Initialize each element with invalid cell iterator and invalid 
+      // subcell indicator, since the element may not exist (e.g., the cell 
+      // is at boundary).
+      for (unsigned int i = 0; i < 9; ++i)
+        stencil[i].reinit(cell->get_dof_handler().end(),
+                          numbers::invalid_unsigned_int);
+
+      if (cell->level() == 0)
+      {
+        /*      ___________________
+         *      |     |     |     |
+         *      |  6  |  7  |  8  |
+         *      |_____|_____|_____|
+         *      |     |     |     |
+         *      |  3  |  4  |  5  |
+         *      |_____|_____|_____|
+         *      |     |     |     |
+         *      |  0  |  1  |  2  |
+         *      |_____|_____|_____|
+         */
+        stencil[4].coarse_cell = cell;
+        stencil[3].coarse_cell = cell->neighbor(0);
+        stencil[5].coarse_cell = cell->neighbor(1);
+        stencil[1].coarse_cell = cell->neighbor(2);
+        stencil[7].coarse_cell = cell->neighbor(3);
+
+        if (stencil[1].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[0].coarse_cell = stencil[1].coarse_cell->neighbor(0);
+          stencil[2].coarse_cell = stencil[1].coarse_cell->neighbor(1);
+        }
+
+        if (stencil[7].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[6].coarse_cell = stencil[7].coarse_cell->neighbor(0);
+          stencil[8].coarse_cell = stencil[7].coarse_cell->neighbor(1);
+        }
+      }
+      else
+      {
+        DoFHandler<2>::cell_iterator parent = cell->parent();
+
+        // get the child index of the present cell
+        unsigned int child_index = numbers::invalid_unsigned_int;
+        for (unsigned int i = 0; i < 4; ++i)
+          if (cell == parent->child(i))
+          {
+            child_index = i;
+            break;
+          }
+        Assert(child_index != numbers::invalid_unsigned_int, ExcInternalError());
+        
+        // Now fill in the stencil.
+        std::vector<DoFHandler<2>::cell_iterator>
+        coarse_cells(4, parent->get_dof_handler().end());
+        switch (child_index)
+        {
+          case 0:
+          {
+            /*      ___________________
+             *      |     |           |
+             *      |     |           |
+             *      |     |           |
+             *      |  2  |     3     |
+             *      |     |           |
+             *      |     |           |
+             *      |_____|___________|
+             *      |     |           |
+             *      |  0  |     1     |
+             *      |_____|___________|
+             */
+            coarse_cells[3] = parent;
+            coarse_cells[2] = parent->neighbor(0);
+            coarse_cells[1] = parent->neighbor(2);
+            if (coarse_cells[1].state() == IteratorState::valid)
+              coarse_cells[0] = coarse_cells[1]->neighbor(0);
+
+            stencil[4].reinit(coarse_cells[3], 0);
+            stencil[5].reinit(coarse_cells[3], 1);
+            stencil[7].reinit(coarse_cells[3], 2);
+            stencil[8].reinit(coarse_cells[3], 3);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+              stencil[0].reinit(coarse_cells[0], 3);
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              stencil[1].reinit(coarse_cells[1], 2);
+              stencil[2].reinit(coarse_cells[1], 3);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+            {
+              stencil[3].reinit(coarse_cells[2], 1);
+              stencil[6].reinit(coarse_cells[2], 3);
+            }
+
+            break;
+          }
+
+          case 1:
+          {
+            /*      ___________________
+             *      |           |     |
+             *      |           |     |
+             *      |           |     |
+             *      |     2     |  3  |
+             *      |           |     |
+             *      |           |     |
+             *      |___________|_____|
+             *      |           |     |
+             *      |     0     |  1  |
+             *      |___________|_____|
+             */
+            coarse_cells[2] = parent;
+            coarse_cells[3] = parent->neighbor(1);
+            coarse_cells[0] = parent->neighbor(2);
+            if (coarse_cells[3].state() == IteratorState::valid)
+              coarse_cells[1] = coarse_cells[3]->neighbor(2);
+
+            stencil[3].reinit(coarse_cells[2], 0);
+            stencil[4].reinit(coarse_cells[2], 1);
+            stencil[6].reinit(coarse_cells[2], 2);
+            stencil[7].reinit(coarse_cells[2], 3);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              stencil[0].reinit(coarse_cells[0], 2);
+              stencil[1].reinit(coarse_cells[0], 3);
+            }
+
+            
+            if (coarse_cells[1].state() == IteratorState::valid)
+              stencil[2].reinit(coarse_cells[1], 2);
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+            {
+              stencil[5].reinit(coarse_cells[3], 0);
+              stencil[8].reinit(coarse_cells[3], 2);
+            }
+
+            break;
+          }
+
+          case 2:
+          {
+            /*      ___________________
+             *      |     |           |
+             *      |  2  |     3     |
+             *      |_____|___________|
+             *      |     |           |
+             *      |     |           |
+             *      |     |           |
+             *      |  0  |     1     |
+             *      |     |           |
+             *      |     |           |
+             *      |_____|___________|
+             */
+            coarse_cells[1] = parent;
+            coarse_cells[0] = parent->neighbor(0);
+            coarse_cells[3] = parent->neighbor(3);
+            if (coarse_cells[0].state() == IteratorState::valid)
+              coarse_cells[2] = coarse_cells[0]->neighbor(3);
+
+            stencil[1].reinit(coarse_cells[1], 0);
+            stencil[2].reinit(coarse_cells[1], 1);
+            stencil[4].reinit(coarse_cells[1], 2);
+            stencil[5].reinit(coarse_cells[1], 3);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              stencil[0].reinit(coarse_cells[0], 1);
+              stencil[3].reinit(coarse_cells[0], 3);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+              stencil[6].reinit(coarse_cells[2], 1);
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+            {
+              stencil[7].reinit(coarse_cells[3], 0);
+              stencil[8].reinit(coarse_cells[3], 1);
+            }
+
+            break;
+          }
+
+          case 3:
+          {
+            /*      ___________________
+             *      |           |     |
+             *      |     2     |  3  |
+             *      |___________|_____|
+             *      |           |     |
+             *      |           |     |
+             *      |           |     |
+             *      |     0     |  1  |
+             *      |           |     |
+             *      |           |     |
+             *      |___________|_____|
+             */
+            coarse_cells[0] = parent;
+            coarse_cells[1] = parent->neighbor(1);
+            coarse_cells[2] = parent->neighbor(3);
+            if (coarse_cells[1].state() == IteratorState::valid)
+              coarse_cells[3] = coarse_cells[1]->neighbor(3);
+
+            stencil[0].reinit(coarse_cells[0], 0);
+            stencil[1].reinit(coarse_cells[0], 1);
+            stencil[3].reinit(coarse_cells[0], 2);
+            stencil[4].reinit(coarse_cells[0], 3);
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              stencil[2].reinit(coarse_cells[1], 0);
+              stencil[5].reinit(coarse_cells[1], 2);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+            {
+              stencil[6].reinit(coarse_cells[2], 0);
+              stencil[7].reinit(coarse_cells[2], 1);
+            }
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+              stencil[8].reinit(coarse_cells[3], 0);
+
+            break;
+          }
+
+          default:
+            Assert(false, ExcInternalError());
+        }
+      }
+    }
+
+
+    void
+    assemble_weno_stencil(const DoFHandler<3>::active_cell_iterator &cell,
+                          std::vector<WENOElement<3>>               &stencil)
+    {
+      AssertDimension(stencil.size(), 27);
+
+      // Initialize each element with invalid cell iterator and invalid 
+      // subcell indicator, since the element may not exist (e.g., the cell 
+      // is at boundary).
+      for (unsigned int i = 0; i < 27; ++i)
+        stencil[i].reinit(cell->get_dof_handler().end(),
+                          numbers::invalid_unsigned_int);
+
+      if (cell->level() == 0)
+      {
+        /*             ______________________________
+         *            /         /         /         /|
+         *           /   24    /   25    /   26    / |
+         *          /_________/_________/_________/  |
+         *         /         /         /         /|  |
+         *        /   21    /   22    /   23    / |26|
+         *       /_________/_________/_________/  |  |
+         *      /         /         /         /|  | /|
+         *     /   18    /   19    /   20    / |23|/ |
+         *    /_________/_________/_________/  |  |  |
+         *    |         |         |         |  | /|17|
+         *    |         |         |         |20|/ |  |
+         *    |    18   |    19   |    20   |  |  | /|
+         *    |         |         |         | /|14|/ |
+         *    |_________|_________|_________|/ |  |  |
+         *    |         |         |         |  | /|8 |
+         *    |         |         |         |11|/ |  |
+         *    |    9    |    10   |    11   |  |  | /
+         *    |         |         |         | /|5 |/
+         *    |_________|_________|_________|/ |  /
+         *    |         |         |         |  | /
+         *    |         |         |         |2 |/
+         *    |    0    |    1    |    2    |  /
+         *    |         |         |         | /
+         *    |_________|_________|_________|/
+         */
+        stencil[13].coarse_cell = cell;
+        stencil[12].coarse_cell = cell->neighbor(0);
+        stencil[14].coarse_cell = cell->neighbor(1);
+        stencil[10].coarse_cell = cell->neighbor(2);
+        stencil[16].coarse_cell = cell->neighbor(3);
+        stencil[ 4].coarse_cell = cell->neighbor(4);
+        stencil[22].coarse_cell = cell->neighbor(5);
+
+        if (stencil[4].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[3].coarse_cell = stencil[4].coarse_cell->neighbor(0);
+          stencil[5].coarse_cell = stencil[4].coarse_cell->neighbor(1);
+          stencil[1].coarse_cell = stencil[4].coarse_cell->neighbor(2);
+          stencil[7].coarse_cell = stencil[4].coarse_cell->neighbor(3);
+        }
+
+        if (stencil[22].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[21].coarse_cell = stencil[22].coarse_cell->neighbor(0);
+          stencil[23].coarse_cell = stencil[22].coarse_cell->neighbor(1);
+          stencil[19].coarse_cell = stencil[22].coarse_cell->neighbor(2);
+          stencil[25].coarse_cell = stencil[22].coarse_cell->neighbor(3);
+        }
+
+        if (stencil[10].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[ 9].coarse_cell = stencil[10].coarse_cell->neighbor(0);
+          stencil[11].coarse_cell = stencil[10].coarse_cell->neighbor(1);
+        }
+
+        if (stencil[16].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[15].coarse_cell = stencil[16].coarse_cell->neighbor(0);
+          stencil[17].coarse_cell = stencil[16].coarse_cell->neighbor(1);
+        }
+
+        if (stencil[1].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[0].coarse_cell = stencil[1].coarse_cell->neighbor(0);
+          stencil[2].coarse_cell = stencil[1].coarse_cell->neighbor(1);
+        }
+
+        if (stencil[7].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[6].coarse_cell = stencil[7].coarse_cell->neighbor(0);
+          stencil[8].coarse_cell = stencil[7].coarse_cell->neighbor(1);
+        }
+
+        if (stencil[19].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[18].coarse_cell = stencil[19].coarse_cell->neighbor(0);
+          stencil[20].coarse_cell = stencil[19].coarse_cell->neighbor(1);
+        }
+
+        if (stencil[25].coarse_cell.state() == IteratorState::valid)
+        {
+          stencil[24].coarse_cell = stencil[25].coarse_cell->neighbor(0);
+          stencil[26].coarse_cell = stencil[25].coarse_cell->neighbor(1);
+        }
+      }
+      else
+      {
+        DoFHandler<3>::cell_iterator parent = cell->parent();
+
+        // Find the child index of the present cell.
+        unsigned int child_index = numbers::invalid_unsigned_int;
+        for (unsigned int i=0; i<8; ++i)
+          if (cell == parent->child(i))
+          {
+            child_index = i;
+            break;
+          }
+        Assert(child_index != numbers::invalid_unsigned_int, ExcInternalError());
+
+        // Now fill in the stencil.
+        std::vector<DoFHandler<3>::cell_iterator> 
+        coarse_cells(8, parent->get_dof_handler().end());
+        switch (child_index)
+        {
+          case 0:
+          {
+            /*          ___________________
+             *         /     /           /|
+             *        /  6  /     7     / |
+             *       /     /           /  |
+             *      /_____/___________/   |
+             *     /  4  /     5     /|   |
+             *    /_____/___________/ | 7 |
+             *    |     |           | |   |
+             *    |     |           | |  /|
+             *    |     |           |5| / |
+             *    |  4  |     5     | |/3 |
+             *    |     |           | |  /
+             *    |_____|___________|/| /
+             *    |     |           |1|/
+             *    |  0  |     1     | /
+             *    |_____|___________|/
+             */
+            coarse_cells[7] = parent;
+            coarse_cells[6] = parent->neighbor(0);
+            coarse_cells[5] = parent->neighbor(2);
+            coarse_cells[3] = parent->neighbor(4);
+            if (coarse_cells[6].state() == IteratorState::valid)
+            {
+              coarse_cells[4] = coarse_cells[6]->neighbor(2);
+              coarse_cells[2] = coarse_cells[6]->neighbor(4);
+            }
+            if (coarse_cells[5].state() == IteratorState::valid)
+              coarse_cells[1] = coarse_cells[5]->neighbor(4);
+            if (coarse_cells[4].state() == IteratorState::valid)
+              coarse_cells[0] = coarse_cells[4]->neighbor(4);
+
+            stencil[13].reinit(coarse_cells[7], 0);
+            stencil[14].reinit(coarse_cells[7], 1);
+            stencil[16].reinit(coarse_cells[7], 2);
+            stencil[17].reinit(coarse_cells[7], 3);
+            stencil[22].reinit(coarse_cells[7], 4);
+            stencil[23].reinit(coarse_cells[7], 5);
+            stencil[25].reinit(coarse_cells[7], 6);
+            stencil[26].reinit(coarse_cells[7], 7);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+              stencil[0].reinit(coarse_cells[0], 7);
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              stencil[1].reinit(coarse_cells[1], 6);
+              stencil[2].reinit(coarse_cells[1], 7);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+            {
+              stencil[3].reinit(coarse_cells[2], 5);
+              stencil[6].reinit(coarse_cells[2], 7);
+            }
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+            {
+              stencil[4].reinit(coarse_cells[3], 4);
+              stencil[5].reinit(coarse_cells[3], 5);
+              stencil[7].reinit(coarse_cells[3], 6);
+              stencil[8].reinit(coarse_cells[3], 7);
+            }
+
+            if (coarse_cells[4].state() == IteratorState::valid)
+            {
+              stencil[ 9].reinit(coarse_cells[4], 3);
+              stencil[18].reinit(coarse_cells[4], 7);
+            }
+
+            if (coarse_cells[5].state() == IteratorState::valid)
+            {
+              stencil[10].reinit(coarse_cells[5], 2);
+              stencil[11].reinit(coarse_cells[5], 3);
+              stencil[19].reinit(coarse_cells[5], 6);
+              stencil[20].reinit(coarse_cells[5], 7);
+            }
+
+            if (coarse_cells[6].state() == IteratorState::valid)
+            {
+              stencil[12].reinit(coarse_cells[6], 1);
+              stencil[15].reinit(coarse_cells[6], 3);
+              stencil[21].reinit(coarse_cells[6], 5);
+              stencil[24].reinit(coarse_cells[6], 7);
+            }
+
+            break;
+          }
+
+          case 1:
+          {
+            /*          ___________________
+             *         /           /     /|
+             *        /     6     /  7  / |
+             *       /           /     /  |
+             *      /___________/_____/   |
+             *     /     4     /  5  /|   |
+             *    /___________/_____/ | 7 |
+             *    |           |     | |   |
+             *    |           |     | |  /|
+             *    |           |     |5| / |
+             *    |     4     |  5  | |/3 |
+             *    |           |     | |  /
+             *    |___________|_____|/| /
+             *    |           |     |1|/
+             *    |     0     |  1  | /
+             *    |___________|_____|/
+             */
+            coarse_cells[6] = parent;
+            coarse_cells[7] = parent->neighbor(1);
+            coarse_cells[4] = parent->neighbor(2);
+            coarse_cells[2] = parent->neighbor(4);
+            if (coarse_cells[4].state() == IteratorState::valid)
+            {
+              coarse_cells[0] = coarse_cells[4]->neighbor(4);
+              coarse_cells[5] = coarse_cells[4]->neighbor(1);
+            }
+            if (coarse_cells[7].state() == IteratorState::valid)
+              coarse_cells[3] = coarse_cells[7]->neighbor(4);
+            if (coarse_cells[0].state() == IteratorState::valid)
+              coarse_cells[1] = coarse_cells[0]->neighbor(1);
+
+            stencil[12].reinit(coarse_cells[6], 0);
+            stencil[13].reinit(coarse_cells[6], 1);
+            stencil[15].reinit(coarse_cells[6], 2);
+            stencil[16].reinit(coarse_cells[6], 3);
+            stencil[21].reinit(coarse_cells[6], 4);
+            stencil[22].reinit(coarse_cells[6], 5);
+            stencil[24].reinit(coarse_cells[6], 6);
+            stencil[25].reinit(coarse_cells[6], 7);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              stencil[0].reinit(coarse_cells[0], 6);
+              stencil[1].reinit(coarse_cells[0], 7);
+            }
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+              stencil[2].reinit(coarse_cells[1], 6);
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+            {
+              stencil[3].reinit(coarse_cells[2], 4);
+              stencil[4].reinit(coarse_cells[2], 5);
+              stencil[6].reinit(coarse_cells[2], 6);
+              stencil[7].reinit(coarse_cells[2], 7);
+            }
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+            {
+              stencil[5].reinit(coarse_cells[3], 4);
+              stencil[8].reinit(coarse_cells[3], 6);
+            }
+
+            if (coarse_cells[4].state() == IteratorState::valid)
+            {
+              stencil[ 9].reinit(coarse_cells[4], 2);
+              stencil[10].reinit(coarse_cells[4], 3);
+              stencil[18].reinit(coarse_cells[4], 6);
+              stencil[19].reinit(coarse_cells[4], 7);
+            }
+
+            if (coarse_cells[5].state() == IteratorState::valid)
+            {
+              stencil[11].reinit(coarse_cells[5], 2);
+              stencil[20].reinit(coarse_cells[5], 6);
+            }
+
+            if (coarse_cells[7].state() == IteratorState::valid)
+            {
+              stencil[14].reinit(coarse_cells[7], 0);
+              stencil[17].reinit(coarse_cells[7], 2);
+              stencil[23].reinit(coarse_cells[7], 4);
+              stencil[26].reinit(coarse_cells[7], 6);
+            }
+
+            break;
+          }
+
+          case 2:
+          {
+            /*          ___________________
+             *         /  6  /     7     /|
+             *        /_____/___________/ |
+             *       /     /           /| |
+             *      /  4  /     5     / | |
+             *     /     /           /  |7|
+             *    /_____/___________/   | |
+             *    |     |           |   | |
+             *    |     |           | 5 |/|
+             *    |  4  |     5     |   |3|
+             *    |     |           |  /| |
+             *    |     |           | / |/
+             *    |_____|___________|/1 /
+             *    |     |           |  /
+             *    |  0  |     1     | /
+             *    |_____|___________|/
+             */
+            coarse_cells[5] = parent;
+            coarse_cells[4] = parent->neighbor(0);
+            coarse_cells[7] = parent->neighbor(3);
+            coarse_cells[1] = parent->neighbor(4);
+            if (coarse_cells[4].state() == IteratorState::valid)
+            {
+              coarse_cells[6] = coarse_cells[4]->neighbor(3);
+              coarse_cells[0] = coarse_cells[4]->neighbor(4);
+            }
+            if (coarse_cells[7].state() == IteratorState::valid)
+              coarse_cells[3] = coarse_cells[7]->neighbor(4);
+            if (coarse_cells[6].state() == IteratorState::valid)
+              coarse_cells[2] = coarse_cells[6]->neighbor(4);
+
+            stencil[10].reinit(coarse_cells[5], 0);
+            stencil[11].reinit(coarse_cells[5], 1);
+            stencil[13].reinit(coarse_cells[5], 2);
+            stencil[14].reinit(coarse_cells[5], 3);
+            stencil[19].reinit(coarse_cells[5], 4);
+            stencil[20].reinit(coarse_cells[5], 5);
+            stencil[22].reinit(coarse_cells[5], 6);
+            stencil[23].reinit(coarse_cells[5], 7);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              stencil[0].reinit(coarse_cells[0], 5);
+              stencil[3].reinit(coarse_cells[0], 7);
+            }
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              stencil[1].reinit(coarse_cells[1], 4);
+              stencil[2].reinit(coarse_cells[1], 5);
+              stencil[4].reinit(coarse_cells[1], 6);
+              stencil[5].reinit(coarse_cells[1], 7);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+              stencil[6].reinit(coarse_cells[2], 5);
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+            {
+              stencil[7].reinit(coarse_cells[3], 4);
+              stencil[8].reinit(coarse_cells[3], 5);
+            }
+
+            if (coarse_cells[4].state() == IteratorState::valid)
+            {
+              stencil[ 9].reinit(coarse_cells[4], 1);
+              stencil[12].reinit(coarse_cells[4], 3);
+              stencil[18].reinit(coarse_cells[4], 5);
+              stencil[21].reinit(coarse_cells[4], 7);
+            }
+
+            if (coarse_cells[6].state() == IteratorState::valid)
+            {
+              stencil[15].reinit(coarse_cells[6], 1);
+              stencil[24].reinit(coarse_cells[6], 5);
+            }
+
+            if (coarse_cells[7].state() == IteratorState::valid)
+            {
+              stencil[16].reinit(coarse_cells[7], 0);
+              stencil[17].reinit(coarse_cells[7], 1);
+              stencil[25].reinit(coarse_cells[7], 4);
+              stencil[26].reinit(coarse_cells[7], 5);
+            }
+
+            break;
+          }
+
+          case 3:
+          {
+            /*          ___________________
+             *         /     6     /  7  /|
+             *        /___________/_____/ |
+             *       /           /     /| |
+             *      /     4     /  5  / | |
+             *     /           /     /  |7|
+             *    /___________/_____/   | |
+             *    |           |     |   | |
+             *    |           |     | 5 |/|
+             *    |     4     |  5  |   |3|
+             *    |           |     |  /| |
+             *    |           |     | / |/
+             *    |___________|_____|/1 /
+             *    |           |     |  /
+             *    |     0     |  1  | /
+             *    |___________|_____|/
+             */
+            coarse_cells[4] = parent;
+            coarse_cells[5] = parent->neighbor(1);
+            coarse_cells[6] = parent->neighbor(3);
+            coarse_cells[0] = parent->neighbor(4);
+            if (coarse_cells[5].state() == IteratorState::valid)
+            {
+              coarse_cells[7] = coarse_cells[5]->neighbor(3);
+              coarse_cells[1] = coarse_cells[5]->neighbor(4);
+            }
+            if (coarse_cells[6].state() == IteratorState::valid)
+              coarse_cells[2] = coarse_cells[6]->neighbor(4);
+            if (coarse_cells[1].state() == IteratorState::valid)
+              coarse_cells[3] = coarse_cells[1]->neighbor(3);
+
+            stencil[ 9].reinit(coarse_cells[4], 0);
+            stencil[10].reinit(coarse_cells[4], 1);
+            stencil[12].reinit(coarse_cells[4], 2);
+            stencil[13].reinit(coarse_cells[4], 3);
+            stencil[18].reinit(coarse_cells[4], 4);
+            stencil[19].reinit(coarse_cells[4], 5);
+            stencil[21].reinit(coarse_cells[4], 6);
+            stencil[22].reinit(coarse_cells[4], 7);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              stencil[0].reinit(coarse_cells[0], 4);
+              stencil[1].reinit(coarse_cells[0], 5);
+              stencil[3].reinit(coarse_cells[0], 6);
+              stencil[4].reinit(coarse_cells[0], 7);
+            }
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              stencil[2].reinit(coarse_cells[1], 4);
+              stencil[5].reinit(coarse_cells[1], 6);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+            {
+              stencil[6].reinit(coarse_cells[2], 4);
+              stencil[7].reinit(coarse_cells[2], 5);
+            }
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+              stencil[8].reinit(coarse_cells[3], 4);
+
+            if (coarse_cells[5].state() == IteratorState::valid)
+            {
+              stencil[11].reinit(coarse_cells[5], 0);
+              stencil[14].reinit(coarse_cells[5], 2);
+              stencil[20].reinit(coarse_cells[5], 4);
+              stencil[23].reinit(coarse_cells[5], 6);
+            }
+
+            if (coarse_cells[6].state() == IteratorState::valid)
+            {
+              stencil[15].reinit(coarse_cells[6], 0);
+              stencil[16].reinit(coarse_cells[6], 1);
+              stencil[24].reinit(coarse_cells[6], 4);
+              stencil[25].reinit(coarse_cells[6], 5);
+            }
+
+            if (coarse_cells[7].state() == IteratorState::valid)
+            {
+              stencil[17].reinit(coarse_cells[7], 0);
+              stencil[26].reinit(coarse_cells[7], 4);
+            }
+
+            break;
+          }
+
+          case 4:
+          {
+            /*          ___________________
+             *         /     /           /|
+             *        /  6  /     7     / |
+             *       /     /           /  |
+             *      /_____/___________/ 7 |
+             *     /  4  /     5     /|  /|
+             *    /_____/___________/ | / |
+             *    |     |           |5|/  |
+             *    |  4  |     5     | |   |
+             *    |_____|___________|/| 3 |
+             *    |     |           | |   |
+             *    |     |           | |  /
+             *    |     |           |1| /
+             *    |  0  |     1     | |/
+             *    |     |           | /
+             *    |_____|___________|/
+             */
+            coarse_cells[3] = parent;
+            coarse_cells[1] = parent->neighbor(2);
+            coarse_cells[2] = parent->neighbor(0);
+            coarse_cells[7] = parent->neighbor(5);
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              coarse_cells[0] = coarse_cells[1]->neighbor(0);
+              coarse_cells[5] = coarse_cells[1]->neighbor(5);
+            }
+            if (coarse_cells[7].state() == IteratorState::valid)
+              coarse_cells[6] = coarse_cells[7]->neighbor(0);
+            if (coarse_cells[0].state() == IteratorState::valid)
+              coarse_cells[4] = coarse_cells[0]->neighbor(5);
+
+            stencil[ 4].reinit(coarse_cells[3], 0);
+            stencil[ 5].reinit(coarse_cells[3], 1);
+            stencil[ 7].reinit(coarse_cells[3], 2);
+            stencil[ 8].reinit(coarse_cells[3], 3);
+            stencil[13].reinit(coarse_cells[3], 4);
+            stencil[14].reinit(coarse_cells[3], 5);
+            stencil[16].reinit(coarse_cells[3], 6);
+            stencil[17].reinit(coarse_cells[3], 7);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              stencil[0].reinit(coarse_cells[0], 3);
+              stencil[9].reinit(coarse_cells[0], 7);
+            }
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              stencil[ 1].reinit(coarse_cells[1], 2);
+              stencil[ 2].reinit(coarse_cells[1], 3);
+              stencil[10].reinit(coarse_cells[1], 6);
+              stencil[11].reinit(coarse_cells[1], 7);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+            {
+              stencil[ 3].reinit(coarse_cells[2], 1);
+              stencil[ 6].reinit(coarse_cells[2], 3);
+              stencil[12].reinit(coarse_cells[2], 5);
+              stencil[15].reinit(coarse_cells[2], 7);
+            }
+
+            if (coarse_cells[4].state() == IteratorState::valid)
+              stencil[18].reinit(coarse_cells[4], 3);
+
+            if (coarse_cells[5].state() == IteratorState::valid)
+            {
+              stencil[19].reinit(coarse_cells[5], 2);
+              stencil[20].reinit(coarse_cells[5], 3);
+            }
+
+            if (coarse_cells[6].state() == IteratorState::valid)
+            {
+              stencil[21].reinit(coarse_cells[6], 1);
+              stencil[24].reinit(coarse_cells[6], 3);
+            }
+
+            if (coarse_cells[7].state() == IteratorState::valid)
+            {
+              stencil[22].reinit(coarse_cells[7], 0);
+              stencil[23].reinit(coarse_cells[7], 1);
+              stencil[25].reinit(coarse_cells[7], 2);
+              stencil[26].reinit(coarse_cells[7], 3);
+            }
+
+            break;
+          }
+          case 5:
+          {
+            /*          ___________________
+             *         /           /     /|
+             *        /     6     /  7  / |
+             *       /           /     /  |
+             *      /___________/_____/ 7 |
+             *     /     4     /  5  /|  /|
+             *    /___________/_____/ | / |
+             *    |           |     |5|/  |
+             *    |     4     |  5  | |   |
+             *    |___________|_____|/| 3 |
+             *    |           |     | |   |
+             *    |           |     | |  /
+             *    |           |     |1| /
+             *    |     0     |  1  | |/
+             *    |           |     | /
+             *    |___________|_____|/
+             */
+            coarse_cells[2] = parent;
+            coarse_cells[3] = parent->neighbor(1);
+            coarse_cells[0] = parent->neighbor(2);
+            coarse_cells[6] = parent->neighbor(5);
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              coarse_cells[1] = coarse_cells[0]->neighbor(1);
+              coarse_cells[4] = coarse_cells[0]->neighbor(5);
+            }
+            if (coarse_cells[3].state() == IteratorState::valid)
+              coarse_cells[7] = coarse_cells[3]->neighbor(5);
+            if (coarse_cells[1].state() == IteratorState::valid)
+              coarse_cells[5] = coarse_cells[1]->neighbor(5);
+
+            stencil[ 3].reinit(coarse_cells[2], 0);
+            stencil[ 4].reinit(coarse_cells[2], 1);
+            stencil[ 6].reinit(coarse_cells[2], 2);
+            stencil[ 7].reinit(coarse_cells[2], 3);
+            stencil[12].reinit(coarse_cells[2], 4);
+            stencil[13].reinit(coarse_cells[2], 5);
+            stencil[15].reinit(coarse_cells[2], 6);
+            stencil[16].reinit(coarse_cells[2], 7);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              stencil[ 0].reinit(coarse_cells[0], 2);
+              stencil[ 1].reinit(coarse_cells[0], 3);
+              stencil[ 9].reinit(coarse_cells[0], 6);
+              stencil[10].reinit(coarse_cells[0], 7);
+            }
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              stencil[ 2].reinit(coarse_cells[1], 2);
+              stencil[11].reinit(coarse_cells[1], 6);
+            }
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+            {
+              stencil[ 5].reinit(coarse_cells[3], 0);
+              stencil[ 8].reinit(coarse_cells[3], 2);
+              stencil[14].reinit(coarse_cells[3], 4);
+              stencil[17].reinit(coarse_cells[3], 6);
+            }
+
+            if (coarse_cells[4].state() == IteratorState::valid)
+            {
+              stencil[18].reinit(coarse_cells[4], 2);
+              stencil[19].reinit(coarse_cells[4], 3);
+            }
+
+            if (coarse_cells[5].state() == IteratorState::valid)
+              stencil[20].reinit(coarse_cells[5], 2);
+
+            if (coarse_cells[6].state() == IteratorState::valid)
+            {
+              stencil[21].reinit(coarse_cells[6], 0);
+              stencil[22].reinit(coarse_cells[6], 1);
+              stencil[24].reinit(coarse_cells[6], 2);
+              stencil[25].reinit(coarse_cells[6], 3);
+            }
+
+            if (coarse_cells[7].state() == IteratorState::valid)
+            {
+              stencil[23].reinit(coarse_cells[7], 0);
+              stencil[26].reinit(coarse_cells[7], 2);
+            }
+
+            break;
+          }
+          
+          case 6:
+          {
+            /*          ___________________
+             *         /  6  /     7     /|
+             *        /_____/___________/ |
+             *       /     /           /|7|
+             *      /  4  /     5     / | |
+             *     /     /           /  |/|
+             *    /_____/___________/ 5 | |
+             *    |     |           |  /| |
+             *    |  4  |     5     | / |3|
+             *    |_____|___________|/  | |
+             *    |     |           |   | |
+             *    |     |           | 1 |/
+             *    |  0  |     1     |   /
+             *    |     |           |  /
+             *    |     |           | /
+             *    |_____|___________|/
+             */
+            coarse_cells[1] = parent;
+            coarse_cells[0] = parent->neighbor(0);
+            coarse_cells[3] = parent->neighbor(3);
+            coarse_cells[5] = parent->neighbor(5);
+            if (coarse_cells[5].state() == IteratorState::valid)
+            {
+              coarse_cells[4] = coarse_cells[5]->neighbor(0);
+              coarse_cells[7] = coarse_cells[5]->neighbor(3);
+            }
+            if (coarse_cells[0].state() == IteratorState::valid)
+              coarse_cells[2] = coarse_cells[0]->neighbor(3);
+            if (coarse_cells[4].state() == IteratorState::valid)
+              coarse_cells[6] = coarse_cells[4]->neighbor(3);
+
+            stencil[ 1].reinit(coarse_cells[1], 0);
+            stencil[ 2].reinit(coarse_cells[1], 1);
+            stencil[ 4].reinit(coarse_cells[1], 2);
+            stencil[ 5].reinit(coarse_cells[1], 3);
+            stencil[10].reinit(coarse_cells[1], 4);
+            stencil[11].reinit(coarse_cells[1], 5);
+            stencil[13].reinit(coarse_cells[1], 6);
+            stencil[14].reinit(coarse_cells[1], 7);
+
+            if (coarse_cells[0].state() == IteratorState::valid)
+            {
+              stencil[ 0].reinit(coarse_cells[0], 1);
+              stencil[ 3].reinit(coarse_cells[0], 3);
+              stencil[ 9].reinit(coarse_cells[0], 5);
+              stencil[12].reinit(coarse_cells[0], 7);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+            {
+              stencil[ 6].reinit(coarse_cells[2], 1);
+              stencil[15].reinit(coarse_cells[2], 5);
+            }
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+            {
+              stencil[ 7].reinit(coarse_cells[3], 0);
+              stencil[ 8].reinit(coarse_cells[3], 1);
+              stencil[16].reinit(coarse_cells[3], 4);
+              stencil[17].reinit(coarse_cells[3], 5);
+            }
+
+            if (coarse_cells[4].state() == IteratorState::valid)
+            {
+              stencil[18].reinit(coarse_cells[4], 1);
+              stencil[21].reinit(coarse_cells[4], 3);
+            }
+
+            if (coarse_cells[5].state() == IteratorState::valid)
+            {
+              stencil[19].reinit(coarse_cells[5], 0);
+              stencil[20].reinit(coarse_cells[5], 1);
+              stencil[22].reinit(coarse_cells[5], 2);
+              stencil[23].reinit(coarse_cells[5], 3);
+            }
+
+            if (coarse_cells[6].state() == IteratorState::valid)
+              stencil[24].reinit(coarse_cells[6], 1);
+
+            if (coarse_cells[7].state() == IteratorState::valid)
+            {
+              stencil[25].reinit(coarse_cells[7], 0);
+              stencil[26].reinit(coarse_cells[7], 1);
+            }
+
+            break;
+          }
+
+          case 7:
+          {
+            /*          ___________________
+             *         /     6     /  7  /|
+             *        /___________/_____/ |
+             *       /           /     /|7|
+             *      /     4     /  5  / | |
+             *     /           /     /  |/|
+             *    /___________/_____/ 5 | |
+             *    |           |     |  /| |
+             *    |     4     |  5  | / |3|
+             *    |___________|_____|/  | |
+             *    |           |     |   | |
+             *    |           |     | 1 |/
+             *    |     0     |  1  |   /
+             *    |           |     |  /
+             *    |           |     | /
+             *    |___________|_____|/
+             */
+            coarse_cells[0] = parent;
+            coarse_cells[1] = parent->neighbor(1);
+            coarse_cells[2] = parent->neighbor(3);
+            coarse_cells[4] = parent->neighbor(5);
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              coarse_cells[3] = coarse_cells[1]->neighbor(3);
+              coarse_cells[5] = coarse_cells[1]->neighbor(5);
+            }
+            if (coarse_cells[2].state() == IteratorState::valid)
+              coarse_cells[6] = coarse_cells[2]->neighbor(5);
+            if (coarse_cells[3].state() == IteratorState::valid)
+              coarse_cells[7] = coarse_cells[3]->neighbor(5);
+
+            stencil[ 0].reinit(coarse_cells[0], 0);
+            stencil[ 1].reinit(coarse_cells[0], 1);
+            stencil[ 3].reinit(coarse_cells[0], 2);
+            stencil[ 4].reinit(coarse_cells[0], 3);
+            stencil[ 9].reinit(coarse_cells[0], 4);
+            stencil[10].reinit(coarse_cells[0], 5);
+            stencil[12].reinit(coarse_cells[0], 6);
+            stencil[13].reinit(coarse_cells[0], 7);
+
+            if (coarse_cells[1].state() == IteratorState::valid)
+            {
+              stencil[ 2].reinit(coarse_cells[1], 0);
+              stencil[ 5].reinit(coarse_cells[1], 2);
+              stencil[11].reinit(coarse_cells[1], 4);
+              stencil[14].reinit(coarse_cells[1], 6);
+            }
+
+            if (coarse_cells[2].state() == IteratorState::valid)
+            {
+              stencil[ 6].reinit(coarse_cells[2], 0);
+              stencil[ 7].reinit(coarse_cells[2], 1);
+              stencil[15].reinit(coarse_cells[2], 4);
+              stencil[16].reinit(coarse_cells[2], 5);
+            }
+
+            if (coarse_cells[3].state() == IteratorState::valid)
+            {
+              stencil[ 8].reinit(coarse_cells[3], 0);
+              stencil[17].reinit(coarse_cells[3], 4);
+            }
+
+            if (coarse_cells[4].state() == IteratorState::valid)
+            {
+              stencil[18].reinit(coarse_cells[4], 0);
+              stencil[19].reinit(coarse_cells[4], 1);
+              stencil[21].reinit(coarse_cells[4], 2);
+              stencil[22].reinit(coarse_cells[4], 3);
+            }
+
+            if (coarse_cells[5].state() == IteratorState::valid)
+  {
+              stencil[20].reinit(coarse_cells[5], 0);
+              stencil[23].reinit(coarse_cells[5], 2);
+            }
+
+            if (coarse_cells[6].state() == IteratorState::valid)
+            {
+              stencil[24].reinit(coarse_cells[6], 0);
+              stencil[25].reinit(coarse_cells[6], 1);
+            }
+
+            if (coarse_cells[7].state() == IteratorState::valid)
+              stencil[26].reinit(coarse_cells[7], 0);
+
+            break;
+          }
+
+          default:
+            Assert(false, ExcInternalError());
+        }
+      }
+    }
+
+
+    /**
+     * A helper function that tells if the child of a given cell in
+     * WENO stencil is adjacent to the target cell.
+     */
+  template <int dim>
+    bool
+    child_is_adjacent_to_target_cell(const unsigned int nth_element,
+                                     const unsigned int nth_child);
+
+
+    template <>
+    bool
+    child_is_adjacent_to_target_cell<2>(const unsigned int nth_element,
+                                        const unsigned int nth_child)
+    {
+      AssertIndexRange(nth_element, 9);
+      AssertIndexRange(nth_child, 4);
+
+      static const unsigned int lookup_table[9][4]
+        = { { 0, 0, 0, 1 }, 
+            { 0, 0, 1, 1 }, 
+            { 0, 0, 1, 0 },
+            { 0, 1, 0, 1 }, 
+            { 0, 0, 0, 0 }, 
+            { 1, 0, 1, 0 },
+            { 0, 1, 0, 0 }, 
+            { 1, 1, 0, 0 }, 
+            { 1, 0, 0, 0 }
+          };
+
+      return static_cast<bool>(lookup_table[nth_element][nth_child]);
+    }
+
+
+    template <>
+    bool
+    child_is_adjacent_to_target_cell<3>(const unsigned int nth_element,
+                                        const unsigned int nth_child)
+    {
+      AssertIndexRange(nth_element, 27);
+      AssertIndexRange(nth_child, 8);
+
+      static const unsigned int lookup_table[27][8]
+        = { { 0, 0, 0, 0, 0, 0, 0, 1 },
+            { 0, 0, 0, 0, 0, 0, 1, 1 },
+            { 0, 0, 0, 0, 0, 0, 1, 0 },
+            { 0, 0, 0, 0, 0, 1, 0, 1 },
+            { 0, 0, 0, 0, 1, 1, 1, 1 },
+            { 0, 0, 0, 0, 1, 0, 1, 0 },
+            { 0, 0, 0, 0, 0, 1, 0, 0 },
+            { 0, 0, 0, 0, 1, 1, 0, 0 },
+            { 0, 0, 0, 0, 1, 0, 0, 0 },
+            { 0, 0, 0, 1, 0, 0, 0, 1 },
+            { 0, 0, 1, 1, 0, 0, 1, 1 },
+            { 0, 0, 1, 0, 0, 0, 1, 0 },
+            { 0, 1, 0, 1, 0, 1, 0, 1 },
+            { 0, 0, 0, 0, 0, 0, 0, 0 },
+            { 1, 0, 1, 0, 1, 0, 1, 0 },
+            { 0, 1, 0, 0, 0, 1, 0, 0 },
+            { 1, 1, 0, 0, 1, 1, 0, 0 },
+            { 1, 0, 0, 0, 1, 0, 0, 0 },
+            { 0, 0, 0, 1, 0, 0, 0, 0 },
+            { 0, 0, 1, 1, 0, 0, 0, 0 },
+            { 0, 0, 1, 0, 0, 0, 0, 0 },
+            { 0, 1, 0, 1, 0, 0, 0, 0 },
+            { 1, 1, 1, 1, 0, 0, 0, 0 },
+            { 1, 0, 1, 0, 0, 0, 0, 0 },
+            { 0, 1, 0, 0, 0, 0, 0, 0 },
+            { 1, 1, 0, 0, 0, 0, 0, 0 },
+            { 1, 0, 0, 0, 0, 0, 0, 0 }
+          };
+
+      return static_cast<bool>(lookup_table[nth_element][nth_child]);
+    }
+  }
+
+
+  template <int dim>
+  template <typename T>
+  void
+  Simulator<dim>::
+  compute_KXRCF_indicators(const std::vector<QPDField> &qpd_fields,
+                           Vector<T>                         &KXRCF_indicators)
+  {
+    // stuff for computing the integrals in cells and cell faces
+    QGauss<dim>   quadrature(2);
+    QGauss<dim-1> face_quadrature(2);
+
+    FEValues<dim> fe_values(*mapping, 
+                            finite_element,
+                            quadrature,
+                            update_values);
+
+    FEFaceValues<dim> fe_face_values(*mapping,
+                                     finite_element,
+                                     face_quadrature,
+                                     update_values |
+                                     update_normal_vectors |
+                                     update_JxW_values);
+
+    FESubfaceValues<dim> fe_subface_values(*mapping,
+                                           finite_element,
+                                           face_quadrature,
+                                           update_values |
+                                           update_normal_vectors |
+                                           update_JxW_values);
+
+    FEFaceValues<dim> neighbor_fe_face_values(*mapping,
+                                              finite_element,
+                                              face_quadrature,
+                                              update_values |
+                                              update_JxW_values);
+
+    const unsigned int n_fields = qpd_fields.size();
+    std::vector<FEValuesExtractors::Scalar> field_extractors;
+    for (unsigned int field = 0; field < n_fields; ++field)
+      field_extractors.push_back(qpd_fields[field].scalar_extractor(introspection));
+
+    FEValuesExtractors::Vector u_extractor(0);
+
+    const unsigned int n_q_points      = fe_values.n_quadrature_points;
+    const unsigned int n_face_q_points = fe_face_values.n_quadrature_points;
+
+    std::vector<std::vector<double>> field_values(n_fields);
+    std::vector<std::vector<double>> face_field_values(n_fields);
+    std::vector<std::vector<double>> neighbor_face_field_values(n_fields);
+    for (unsigned int field = 0; field < n_fields; ++field)
+    {
+      field_values[field].resize(n_q_points);
+      face_field_values[field].resize(n_face_q_points);
+      neighbor_face_field_values[field].resize(n_face_q_points);
+    }
+
+    std::vector<Tensor<1,dim>> face_velocity_values(n_face_q_points);
+    std::vector<Tensor<1,dim>> face_mesh_velocity_values(n_face_q_points);
+
+    // KXRCF indicator requires the computation of (1) cell maximum norm; 
+    // (2) integration of the jump over inflow faces of each field. To
+    // avoid doing integration twice on each cell face, we set up a map
+    // to store the cell data and then loop over the cells using the same
+    // strategy as in Assemblers::AdvectionSystemInteriorFace::execute().
+    std::map<unsigned int, internal::KXRCFCellData> data;
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      if (cell->is_locally_owned())
+        data.insert(std::make_pair(cell->active_cell_index(), 
+                                   internal::KXRCFCellData(n_fields)));
+
+    // Now loop over locally owned cells and compute the maximum norm
+    // and the jump over inflow faces for each field.
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      if (cell->is_locally_owned())
+      {
+        auto cell_data = data.find(cell->active_cell_index());
+
+        // Compute the maximum norm of field values in this cell.
+        fe_values.reinit(cell);
+        for (unsigned int field = 0; field < n_fields; ++field)
+        {
+          fe_values[field_extractors[field]].get_function_values(solution, field_values[field]);
+          for (unsigned int q = 0; q < n_q_points; ++q)
+            cell_data->second.max_norms[field] = std::max(cell_data->second.max_norms[field],
+                                                          std::abs(field_values[field][q]));
+        }
+
+        // Compute the jump of field values over inflow faces.
+        for (const unsigned int face_no : cell->face_indices())
+        {
+          if (!cell->at_boundary(face_no) || cell->has_periodic_neighbor(face_no))
+          {
+            const typename DoFHandler<dim>::cell_iterator
+            neighbor = cell->neighbor_or_periodic_neighbor(face_no);
+
+            const bool cell_has_periodic_neighbor = cell->has_periodic_neighbor(face_no);
+
+            // 'neighbor' defined above is NOT active_cell_iterator, this includes cells 
+            // that are refined
+            if (!neighbor->has_children())
+            {
+              if (neighbor->level() == cell->level() &&
+                  neighbor->is_active() &&
+                  (((neighbor->is_locally_owned()) && (cell->index() < neighbor->index()))
+                   ||
+                   ((!neighbor->is_locally_owned()) && (cell->subdomain_id() < neighbor->subdomain_id()))))
+              {
+                // cell and neighbor are equal-sized, and cell has been chosen to
+                // assemble this face, so calculate from cell
+                const unsigned int neighbor2 =
+                  (cell->has_periodic_neighbor(face_no)
+                   ?
+                   cell->periodic_neighbor_of_periodic_neighbor(face_no)
+                   :
+                   cell->neighbor_of_neighbor(face_no));
+
+                auto neighbor_data = data.find(neighbor->active_cell_index());
+
+                // Set up face values.
+                fe_face_values.reinit(cell, face_no);
+                for (unsigned int field = 0; field < n_fields; ++field)
+                  fe_face_values[field_extractors[field]].get_function_values(solution, face_field_values[field]);
+
+                fe_face_values[introspection.extractors.velocities].get_function_values(
+                  solution, face_velocity_values);
+                if (parameters.mesh_deformation_enabled)
+                  fe_face_values[introspection.extractors.velocities].get_function_values(
+                    mesh_deformation->mesh_velocity, face_mesh_velocity_values);
+                
+                // Set up neighbor values.
+                neighbor_fe_face_values.reinit(neighbor, neighbor2);
+                for (unsigned int field = 0; field < n_fields; ++field)
+                  neighbor_fe_face_values[field_extractors[field]].get_function_values(solution, neighbor_face_field_values[field]);
+
+                const double face_measure = cell->face(face_no)->measure();
+
+                for (unsigned int q = 0; q < n_face_q_points; ++q)
+                {
+                  bool inflow = ((face_velocity_values[q] - face_mesh_velocity_values[q])
+                                 * fe_face_values.normal_vector(q) < 0.0);
+                  
+                  const double scaling_factor = fe_face_values.JxW(q) / face_measure;
+
+                  for (unsigned int field = 0; field < n_fields; ++field)
+                  {
+                    const double jump = (face_field_values[field][q] - neighbor_face_field_values[field][q])
+                                        * scaling_factor;
+
+                    if (inflow)
+                      cell_data->second.face_jumps[field] += jump;
+                    else
+                    {
+                      if (neighbor_data != data.end())
+                        neighbor_data->second.face_jumps[field] -= jump; 
+                    }
+                  }
+                }
+              }
+              else
+              {
+                // Neighbor is taking responsibility for assembly of this face, bacause
+                // either (1) neighbor is coarser, or
+                //        (2) neighbor is equally-sized and
+                //           (a) neighbor is on a different subdomain, with lower subdomain_id(), or
+                //           (b) nieghbor is on the same subdomain and has lower index().
+              }
+            }
+            else
+            {
+              // Neighbor has children, so always assemble from here.
+              const unsigned int neighbor2 = 
+                (cell_has_periodic_neighbor
+                 ?
+                 cell->periodic_neighbor_face_no(face_no)
+                 :
+                 cell->neighbor_face_no(face_no));
+
+              // Loop over subfaces. We know that the neighbor is finer, so we could loop over the subfaces of the current
+              // face. but if we are at a periodic boundary, then the face of the current cell has no children, so instead use
+              // the children of the periodic neighbor's corresponding face since we know that the letter does indeed have
+              // children (because we know that the neighbor is refined).
+              typename DoFHandler<dim>::face_iterator neighbor_face = neighbor->face(neighbor2);
+for (unsigned int subface_no = 0; subface_no < neighbor_face->n_children(); ++subface_no)
+              {
+                const typename DoFHandler<dim>::active_cell_iterator neighbor_child =
+                  (cell_has_periodic_neighbor 
+                   ?
+                   cell->periodic_neighbor_child_on_subface(face_no, subface_no)
+                   :
+                   cell->neighbor_child_on_subface(face_no, subface_no));
+
+                auto neighbor_data = data.find(neighbor_child->active_cell_index());
+
+                // Set up subface values.
+                fe_subface_values.reinit(cell, face_no, subface_no);
+                for (unsigned int field = 0; field < n_fields; ++field)
+                  fe_subface_values[field_extractors[field]].get_function_values(solution, face_field_values[field]);
+
+                fe_subface_values[introspection.extractors.velocities].get_function_values(
+                  solution, face_velocity_values);
+                if (parameters.mesh_deformation_enabled)
+                  fe_subface_values[introspection.extractors.velocities].get_function_values(
+                    mesh_deformation->mesh_velocity, face_mesh_velocity_values);
+
+                // Set up neighbor face values.
+                neighbor_fe_face_values.reinit(neighbor_child, neighbor2);
+                for (unsigned int field = 0; field < n_fields; ++field)
+                  neighbor_fe_face_values[field_extractors[field]].get_function_values(solution, neighbor_face_field_values[field]);
+
+                const double face_measure = neighbor_child->face(neighbor2)->measure();
+
+                for (unsigned int q = 0; q < n_face_q_points; ++q)
+                {
+                  bool inflow = ((face_velocity_values[q] - face_mesh_velocity_values[q])
+                                 * fe_subface_values.normal_vector(q) < 0.0);
+                  
+                  const double scaling_factor = fe_subface_values.JxW(q) / face_measure;
+
+                  for (unsigned int field = 0; field < n_fields; ++field)
+                  {
+                    const double jump = (face_field_values[field][q] - neighbor_face_field_values[field][q])
+                                        * scaling_factor;
+
+                    if (inflow)
+                      cell_data->second.face_jumps[field] += jump;
+                    else
+                    {
+                      if (neighbor_data != data.end())
+                        neighbor_data->second.face_jumps[field] -= jump;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          else
+          {
+            // The current face is a boundary face.
+          }
+        }
+      }
+
+    // Finally, compute the KXRCF indicator for each field and pick the largest one 
+    // as troubled cell indicator.
+    KXRCF_indicators.reinit(triangulation.n_active_cells());
+
+    const double epsilon = 1e-20;
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      if (cell->is_locally_owned())
+      {
+        const double h = cell->diameter();
+        const auto cell_data = data.find(cell->active_cell_index());
+        double I_max = 0;
+        for (unsigned int field = 0; field < n_fields; ++field)
+          I_max = std::max(I_max, std::abs(cell_data->second.face_jumps[field]) 
+                                  / (h * (cell_data->second.max_norms[field] + epsilon)));
+
+        KXRCF_indicators[cell->active_cell_index()] = I_max;
+      }
+  }
+
+  
+  template <int dim>
+  void 
+  Simulator<dim>::
+  apply_WENO_limiter(const std::vector<QPDField> &qpd_fields)
+  {
+    const unsigned int n_fields = qpd_fields.size();
+
+    TrilinosWrappers::MPI::BlockVector distributed_solution(introspection.index_sets.system_partitioning,
+                                                            mpi_communicator);
+    for (unsigned int field = 0; field < n_fields; ++field)
+    {
+      const unsigned int block_idx = qpd_fields[field].block_index(introspection);
+      distributed_solution.block(block_idx) = solution.block(block_idx);
+    }
+
+    // We use FEValues to calculate the integrals of the monomial basis and the field values.
+    // To handle the numerical integrations in case 1, we need 2^dim special FEValues objects
+    // that work on Gaussian quadrature points in subcells.
+    QGauss<dim> quadrature(2);
+    FEValues<dim> fe_values(*mapping, finite_element, quadrature,
+                            update_values | update_quadrature_points | update_JxW_values);
+
+    std::vector<std::unique_ptr<FEValues<dim>>> fe_subcell_values;
+    for (unsigned int i = 0; i < GeometryInfo<dim>::max_children_per_cell; ++i)
+    {
+      std::vector<Point<dim>> points(quadrature.get_points());
+      std::vector<double> weights(quadrature.get_weights());
+
+      for (unsigned int q = 0; q < points.size(); ++q)
+      {
+        for (unsigned int d = 0; d < dim; ++d)
+          points[q][d] += ((i>>d)&1);
+
+        points[q] *= 0.5;
+
+        weights[q] *= Utilities::fixed_power<dim,double>(0.5);
+      }
+
+      Quadrature<dim> subcell_quadrature(points, weights);
+      fe_subcell_values.push_back(std::make_unique<FEValues<dim>>(
+        *mapping, finite_element, subcell_quadrature,
+        update_values | update_quadrature_points | update_JxW_values));
+    }
+
+    std::vector<FEValuesExtractors::Scalar> field_extractors;
+    for (unsigned int field = 0; field < n_fields; ++field)
+      field_extractors.push_back(qpd_fields[field].scalar_extractor(introspection));
+
+    // Detect troubled cells with KXRCF indicator.
+    Vector<double> KXRCF_indicators;
+    compute_KXRCF_indicators(qpd_fields, KXRCF_indicators);
+
+    const unsigned int n_quadrature_points  = fe_values.n_quadrature_points;
+    const unsigned int field_dofs_per_cell  = finite_element.base_element(qpd_fields[0].base_element(introspection)).dofs_per_cell;
+    const unsigned int elements_per_stencil = internal::WENOReconstructor<dim>::elements_per_stencil;
+    const unsigned int p2_space_dimension   = internal::WENOReconstructor<dim>::p2_space_dimension;
+
+    std::vector<internal::WENOElement<dim>> weno_stencil(elements_per_stencil);
+    internal::WENOReconstructor<dim> weno_reconstructor;
+
+    // values of the quadratic polynomial basis at quadrature points
+    std::vector<std::vector<double>> basis_values(n_quadrature_points, 
+                                                  std::vector<double>(p2_space_dimension));
+
+    // integrals of the quadratic polynomial basis in each element of
+    // the WENO stencil
+    std::vector<std::vector<double>> basis_integrals(elements_per_stencil, 
+                                                     std::vector<double>(p2_space_dimension));
+
+    // field values at quadrature points
+    std::vector<std::vector<double>> field_values(n_fields, 
+                                                  std::vector<double>(n_quadrature_points));
+
+    // field integrals in each element of the WENO stencil
+    std::vector<std::vector<double>> field_integrals(n_fields, 
+                                                     std::vector<double>(elements_per_stencil));
+
+    // values of the reconstructed polynomial at quadrature points.
+    std::vector<double> reconstructed_values(n_quadrature_points);
+
+    // stuff for projecting the reconstructed polynomial onto grid nodes
+    FullMatrix<double> cell_matrix(field_dofs_per_cell, field_dofs_per_cell);
+    Vector<double> cell_rhs(field_dofs_per_cell);
+    Vector<double> cell_solution(field_dofs_per_cell);
+    std::vector<types::global_dof_index> cell_dof_indices(finite_element.dofs_per_cell);
+    std::vector<types::global_dof_index> field_dof_indices(field_dofs_per_cell);
+    std::vector<double> phi(field_dofs_per_cell);
+
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      if (cell->is_locally_owned())
+      {
+        // If the KXRCF indicator of the present cell is lower than the threshold,
+        // then we do not have to do WENO reconstruction for the cell.
+        //if (KXRCF_indicators[cell->active_cell_index()] < parameters.KXRCF_indicator_threshold)
+        if (KXRCF_indicators[cell->active_cell_index()] < 0.1)
+          continue;
+
+        // Find the 3^dim cells constructing the WENO stencil.
+        internal::assemble_weno_stencil(cell, weno_stencil);
+
+        // Compute the integration of monomial basis and field values in advance.
+        // We use the center of the target cell as the coordinate origin.
+        for (unsigned int i = 0; i < elements_per_stencil; ++i)
+          std::fill(basis_integrals[i].begin(), basis_integrals[i].end(), 0.0);
+        for (unsigned int field = 0; field < n_fields; ++field)
+          std::fill(field_integrals[field].begin(), field_integrals[field].end(), 0.0);
+
+        const Point<dim> origin = cell->center();
+        for (unsigned int i = 0; i < elements_per_stencil; ++i)
+        {
+          const internal::WENOElement<dim> &element = weno_stencil[i];
+          if (element.coarse_cell.state() != IteratorState::valid)
+          {
+            // The element does not exist.
+            for (unsigned int j = 0; j < p2_space_dimension; ++j)
+              basis_integrals[i][j] = numbers::signaling_nan<double>();
+            for (unsigned int field = 0; field < n_fields; ++field)
+              field_integrals[field][i] = numbers::signaling_nan<double>();
+
+            continue;
+          }
+
+          if (element.coarse_cell->is_active() && 
+              element.subcell_id != numbers::invalid_unsigned_int)
+          {
+            std::cout << "case 1" << std::endl;
+            // Case 1: the integrations are computed in a subcell.
+            AssertDimension(element.coarse_cell->level(), cell->level() - 1);
+
+            // Select the FEValues object corresponding to the subcell indicator to
+            // compute the field values and Jacobians at quadrature points.
+            FEValues<dim> *fev = fe_subcell_values[element.subcell_id].get();
+            fev->reinit(element.coarse_cell);
+
+            for (unsigned int field = 0; field < n_fields; ++field)
+              (*fev)[field_extractors[field]].get_function_values(solution, field_values[field]);
+
+            std::cout << "field_values: " << std::endl;
+            for (unsigned int q = 0; q < n_quadrature_points; ++q)
+              std::cout << field_values[0][q] << ' ';
+            std::cout << std::endl;
+
+            for (unsigned int q = 0; q < n_quadrature_points; ++q)
+            {
+              for (unsigned int field = 0; field < n_fields; ++field)
+                field_integrals[field][i] += field_values[field][q] * fev->JxW(q);
+
+              const Point<dim> q_point(fev->quadrature_point(q) - origin);
+              internal::WENOReconstructor<dim>::compute_p2_basis_values(q_point, basis_values[q]);
+              for (unsigned int j = 0; j < p2_space_dimension; ++j)
+                basis_integrals[i][j] += basis_values[q][j] * fev->JxW(q);
+            }
+            std::cout << "field_integrals[" << i << "] = " << field_integrals[0][i] << std::endl;
+          }
+          else
+          {
+            if (element.subcell_id != numbers::invalid_unsigned_int &&
+                element.coarse_cell->has_children() &&
+                element.coarse_cell->child(element.subcell_id)->has_children())
+            {
+              std::cout << "case 2" << std::endl;
+              // Case 2: the integrations are calculated as the sum of integrations in
+              // 2^(dim-1) children.
+              AssertDimension(element.coarse_cell->level(), cell->level() - 1);
+
+              const std::vector<typename DoFHandler<dim>::active_cell_iterator> children =
+                GridTools::get_active_child_cells<DoFHandler<dim>>(element.coarse_cell->child(element.subcell_id));
+
+              for (unsigned int c = 0; c < children.size(); ++c)
+              {
+                if (internal::child_is_adjacent_to_target_cell<dim>(i, c))
+                {
+                  fe_values.reinit(children[c]);
+                  for (unsigned int field = 0; field < n_fields; ++field)
+                    fe_values[field_extractors[field]].get_function_values(solution, field_values[field]);
+
+                  for (unsigned int q = 0; q < n_quadrature_points; ++q)
+                  {
+                    for (unsigned int field = 0; field < n_fields; ++field)
+                      field_integrals[field][i] += field_values[field][q] * fe_values.JxW(q);
+
+                    const Point<dim> q_point(fe_values.quadrature_point(q) - origin);
+                    internal::WENOReconstructor<dim>::compute_p2_basis_values(q_point, basis_values[q]);
+                    for (unsigned int j = 0; j < p2_space_dimension; ++j)
+                      basis_integrals[i][j] += basis_values[q][j] * fe_values.JxW(q);
+                  }
+                }
+              }
+              std::cout << "field_integrals[" << i << "] = " << field_integrals[0][i] << std::endl;
+            }
+            else
+            {
+              std::cout << "case 3" << std::endl;
+              // Case 3: the integrations are computed in an active neighbor cell.
+              // 2 possibilities: (a) the cell is active with an invalid subcell id, which
+              //                      occurs only when the cell is in level 0;
+              //                  (b) the cell is inactive with a valid subcell id, and the
+              //                      target child is active.
+              typename DoFHandler<dim>::active_cell_iterator neighbor;
+              if (element.subcell_id == numbers::invalid_unsigned_int)
+              {
+                AssertDimension(element.coarse_cell->level(), 0);
+                neighbor = element.coarse_cell;
+              }
+              else
+              {
+                Assert(element.coarse_cell->child(element.subcell_id)->is_active(),
+                       ExcInternalError());
+                neighbor = element.coarse_cell->child(element.subcell_id);
+              }
+              
+              fe_values.reinit(neighbor);
+              for (unsigned int field = 0; field < n_fields; ++field)
+                fe_values[field_extractors[field]].get_function_values(solution, field_values[field]);
+
+              std::cout << "field_values: " << std::endl;
+              for (unsigned int q = 0; q < n_quadrature_points; ++q)
+                std::cout << field_values[0][q] << ' ';
+              std::cout << std::endl;
+
+              for (unsigned int q = 0; q < n_quadrature_points; ++q)
+              {
+                for (unsigned int field = 0; field < n_fields; ++field)
+                  field_integrals[field][i] += field_values[field][q] * fe_values.JxW(q);
+
+                const Point<dim> q_point(fe_values.quadrature_point(q) - origin);
+                internal::WENOReconstructor<dim>::compute_p2_basis_values(q_point, basis_values[q]);
+                for (unsigned int j = 0; j < p2_space_dimension; ++j)
+                  basis_integrals[i][j] += basis_values[q][j] * fe_values.JxW(q);
+              }
+              std::cout << "field_integrals[" << i << "] = " << field_integrals[0][i] << std::endl;
+            }
+          }
+        }
+
+        // Compute the basis values of the quadratic polynomial at quadrature points
+        // of the target cell.
+        fe_values.reinit(cell);
+        for (unsigned int q = 0; q < n_quadrature_points; ++q)
+        {
+          const Point<dim> q_point(fe_values.quadrature_point(q) - origin);
+          internal::WENOReconstructor<dim>::compute_p2_basis_values(q_point, basis_values[q]);
+        }
+
+        // Sort out the invalid substencils.
+        std::set<unsigned int> invalid_substencils;
+        for (const unsigned int face_no : cell->face_indices())
+          if (cell->at_boundary(face_no))
+            for(unsigned int child_no = 0; child_no < GeometryInfo<dim>::max_children_per_face; ++child_no)
+              invalid_substencils.insert(GeometryInfo<dim>::child_cell_on_face(
+                RefinementCase<dim>::isotropic_refinement, face_no, child_no));
+
+        // Reinitialize the auxiliary matrices and vectors that only depend on
+        // the mesh geometry.
+        weno_reconstructor.prepare_for_polynomial_reconstruction(basis_integrals, 
+                                                                 basis_values,
+                                                                 invalid_substencils);
+
+        // Finally, execute WENO reconstruction and project the reconstructed 
+        // polynomial onto grid nodes.
+        cell->get_dof_indices(cell_dof_indices);
+        for (unsigned int field = 0; field < n_fields; ++field)
+        {
+          weno_reconstructor.execute_polynomial_reconstruction(field_integrals[field],
+                                                               reconstructed_values);
+
+          // Get the dof indices of the present field.
+          for (unsigned int i = 0, i_field = 0; i_field < field_dofs_per_cell; /*increment at end of loop*/)
+          {
+            if (finite_element.system_to_component_index(i).first == qpd_fields[field].component_index(introspection))
+            {
+              field_dof_indices[i_field] = cell_dof_indices[i];
+              ++i_field;
+            }
+            ++i;
+          }
+
+          cell_matrix = 0;
+          cell_rhs = 0;
+          for (unsigned int q = 0; q < n_quadrature_points; ++q)
+          {
+            // Get the values of shape functions at quadrature points.
+            for (unsigned int i = 0, i_field = 0; i_field < field_dofs_per_cell; /*increment at end of loop*/)
+            {
+              if (finite_element.system_to_component_index(i).first == qpd_fields[field].component_index(introspection))
+              {
+                phi[i_field] = fe_values[field_extractors[field]].value(i, q);
+                ++i_field;
+              }
+              ++i;
+            }
+
+            for (unsigned int i = 0; i < field_dofs_per_cell; ++i)
+            {
+              for (unsigned int j = 0; j < field_dofs_per_cell; ++j)
+                cell_matrix(i, j) += phi[i] * phi[j] * fe_values.JxW(q);
+
+              cell_rhs(i) += phi[i] * reconstructed_values[q] * fe_values.JxW(q);
+            }
+          }
+
+          // do the local projection
+          cell_matrix.gauss_jordan();
+          cell_matrix.vmult(cell_solution, cell_rhs);
+
+          for (unsigned int i = 0; i < field_dofs_per_cell; ++i)
+            distributed_solution[field_dof_indices[i]] = cell_solution[i];
+        }
+      }
+
+    // Copy the results to the solution vector. Since FE_DGQ does not have 
+    // relevant DoFs, there is no need to compress the distributed solution
+    // vector.
+    for (unsigned int field = 0; field < n_fields; ++field)
+    {
+      const unsigned int block_idx = qpd_fields[field].block_index(introspection);
+      solution.block(block_idx) = distributed_solution.block(block_idx);
+    }
+  }
+}
+
+
+// explicit instantiations
+namespace aspect
+{
+#define INSTANTIATE(dim) \
+  template void Simulator<dim>::compute_KXRCF_indicators(const std::vector<QPDField> &, \
+                                                         Vector<double> &); \
+  template void Simulator<dim>::compute_KXRCF_indicators(const std::vector<QPDField> &, \
+                                                         Vector<float> &); \
+  template void Simulator<dim>::apply_WENO_limiter(const std::vector<QPDField> &);
+
+  ASPECT_INSTANTIATE(INSTANTIATE)
+
+#undef INSTANTIATE
+}

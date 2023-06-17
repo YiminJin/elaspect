@@ -1,0 +1,61 @@
+#ifndef _elaspect_material_model_plasticity_drucker_prager_h
+#define _elaspect_material_model_plasticity_drucker_prager_h
+
+#include <elaspect/material_model/plasticity/interface.h>
+#include <elaspect/simulator_access.h>
+
+namespace elaspect
+{
+  namespace MaterialModel
+  {
+    namespace Plasticity
+    {
+      using namespace dealii;
+
+      template <int dim>
+      class DruckerPrager : public Interface<dim>, public SimulatorAccess<dim>
+      {
+        public:
+          void
+          apply_return_mapping(const MaterialModel::MaterialModelInputs<dim> &in,
+                               const unsigned int i,
+                               const std::vector<double> &volume_fractions,
+                               const MaterialUtilities::CompositionalAveragingOperation avg_scheme,
+                               const SymmetricTensor<4,dim> &elastic_modulus,
+                               const SymmetricTensor<2,dim> &trial_stress,
+                               StateUpdates<dim> &state_updates) const override;
+
+          void
+          compute_tangent_modulus(const MaterialModel::MaterialModelInputs<dim> &in,
+                                  const unsigned int i,
+                                  const std::vector<double> &volume_fractions,
+                                  const MaterialUtilities::CompositionalAveragingOperation avg_scheme,
+                                  const SymmetricTensor<2,dim> &trial_elastic_strain,
+                                  const SymmetricTensor<4,dim> &elastic_modulus,
+                                  SymmetricTensor<4,dim> &tangent_modulus) const override;
+
+          std::pair<double, double>
+          compute_hardening_modulus(const double reference_cohesion,
+                                    const double plastic_strain) const;
+
+          static
+          void
+          declare_parameters (ParameterHandler &prm);
+
+          void
+          parse_parameters (ParameterHandler &prm) override;
+
+        private:
+          std::vector<double> eta;
+          std::vector<double> eta_bar;
+          std::vector<double> xi;
+          std::vector<double> c0;
+
+          std::vector<double> hardening_stages;
+          std::vector<double> hardening_factors;
+      };
+    }
+  }
+}
+
+#endif

@@ -1,0 +1,152 @@
+set Dimension                               = 2
+set Output directory                        = output
+set Use years in output instead of seconds  = false
+set End time                                = 4e13
+set Timing output frequency                 = 5
+
+
+subsection Geometry model
+  set Model name = box
+
+  subsection Box
+    set Box origin X coordinate = -50e3
+    set Box origin Y coordinate = -15e3
+    set X extent = 100e3
+    set Y extent = 30e3
+    set X repetitions = 50
+    set Y repetitions = 15
+  end
+end
+
+
+subsection Compositional fields
+  set Number of fields = 1
+  set Names of fields = inclusion
+end
+
+
+subsection Initial composition model
+  set Model name = function
+  
+  subsection Function
+    set Variable names = x, y
+    set Function expression = if(x*x + y*y < 4e6, 1, 0)
+  end
+end
+
+
+subsection Initial temperature model
+  set Model name = function
+
+  subsection Function
+    set Variable names = x, y
+    set Function expression = 293.15  + (15e3 - y) * 0.015
+  end
+end
+
+
+subsection Material model
+  set Constitutive relation = elasticity, viscosity, plasticity
+  set Rheological parameters averaging scheme = geometric
+
+  subsection Basic properties
+    set Model name = simple
+
+    subsection Simple model
+      set Young's moduli        = 2.98e10
+      set Poisson's ratio       = 0.49
+      set Reference densities   = 2700
+      set Thermal expansivities = 0
+    end
+  end
+
+  subsection Viscosity
+    set Model name = diffusion dislocation
+
+    subsection Diffusion dislocation
+      set Prefactors for diffusion creep            = 0
+      set Prefactors for dislocation creep          = 3.16e-26, 1e-20
+      set Stress exponents for dislocation creep    = 3.3
+      set Activation energies for dislocation creep = 186.5e3,  1
+      set Activation volumes for dislocation creep  = 0
+      set Minimum viscosity = 1e18
+      set Maximum viscosity = 1e24
+    end
+  end
+
+  subsection Plasticity
+    set Model name = drucker prager
+
+    subsection Drucker Prager
+      set Cohesion        = 5e7, 1e5
+      set Friction angle  = 30,  1
+      set Dilatancy angle = 1
+      set Plastic damper viscosity = 1e21
+    end
+  end
+end
+
+
+subsection Gravity model
+  set Model name = vertical
+
+  subsection Vertical
+    set Magnitude = 0
+  end
+end
+
+
+subsection Boundary velocity model
+  set Prescribed velocity boundary indicators = left   x : function, \
+                                                right  x : function, \
+                                                bottom y : function, \
+                                                top    y : function
+
+  subsection Function
+    set Variable names = x, y
+    set Function constants = v_x=5e-11, v_y=1.5e-11
+    set Function expression = if(x<0, v_x, -v_x); if(y<0, -v_y, v_y)
+  end
+end
+
+
+subsection Discretization
+  set Displacement polynomial degree          = 2
+  set Number of Gaussian points per dimension = 3
+end
+
+
+subsection Mesh refinement
+  set Initial global refinement = 2
+  set Time steps between mesh refinement = 0
+end
+
+
+subsection Solver parameters
+  subsection Solid system
+    set Maximum nonlinear iterations = 30
+    set Nonlinear solver tolerance   = 1e-6
+    set Linear solver scheme         = MUMPS
+    set Maximum line search steps    = 10
+  end
+end
+
+
+subsection Time stepping
+  set First time step size = 1e-10
+  set List of model names = function
+
+  subsection Function
+    set Function expression = 4e11
+  end
+end
+
+
+subsection Postprocess
+  set List of postprocessors = visualization
+  
+  subsection Visualization
+    set List of output variables = strain rate
+    set Time between graphical output = 2e12
+  end
+end

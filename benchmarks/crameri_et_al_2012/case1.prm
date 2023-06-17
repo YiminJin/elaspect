@@ -1,0 +1,147 @@
+set Dimension                               = 2
+set Output directory                        = output_case1
+set Use years in output instead of seconds  = true
+set Use ALE method                          = true
+set CFL number                              = 0.5
+set End time                                = 100e3
+set Timing output frequency                 = 5
+
+
+subsection Geometry model
+  set Model name = box
+
+  subsection Box
+    set X extent = 2800e3
+    set Y extent = 700e3
+    set X repetitions = 140
+    set Y repetitions = 35
+  end
+end
+
+
+subsection Initial topography
+  set Model name = function
+
+  subsection Function
+    set Variable names = x, y
+    set Function constants = pi=3.141592653, L=1400e3
+    set Function expression = 7000 * cos(pi * x / L)
+  end
+end
+
+
+subsection Compositional fields
+  set Number of fields = 1
+  set Names of fields = mantle
+end
+
+
+subsection Initial composition model
+  set Model name = function
+
+  subsection Function
+    set Variable names = x, y
+    set Function constants = h=600e3
+    set Function expression = if(y<h, 1, 0)
+  end
+end
+
+
+subsection Material model
+  set Constitutive relation = elasticity, viscosity
+  set Rheological parameters averaging scheme = harmonic
+
+  subsection Basic properties
+    set Model name = simple
+
+    subsection Simple model
+      set Reference densities = 3300
+      set Young's moduli = 2.998e15
+      set Poisson's ratio = 0.499
+    end
+  end
+
+  subsection Viscosity
+    set Model name = simple
+    
+    subsection Simple model
+      set Viscosity = 1e23, 1e21
+    end
+  end
+end
+
+
+subsection Gravity model
+  set Model name = vertical
+
+  subsection Vertical
+    set Magnitude = 10
+  end
+end
+
+
+subsection Boundary velocity model
+  set Zero velocity boundary indicators       = bottom
+  set Tangential velocity boundary indicators = left, right
+end
+
+
+subsection Mesh deformation
+  set Free surface boundary indicators = top
+  set Additional tangential mesh velocity boundary indicators = left, right
+
+  subsection Free surface
+    set Model name = simple
+    set Free surface stabilization theta = 0
+  end
+
+  subsection Mesh smoothing
+    set Model name = laplacian
+  end
+end
+
+
+subsection Discretization
+  set Displacement polynomial degree          = 2
+  set Number of Gaussian points per dimension = 3
+end
+
+
+subsection Mesh refinement
+  set Initial global refinement = 1
+  set Time steps between mesh refinement = 0
+end
+
+
+subsection Solver parameters
+  subsection Solid system
+    set Maximum linear iterations = 1000
+    set Linear solver scheme      = MUMPS
+    set Linear solver tolerance   = 1e-8
+    set AMG aggregation threshold = 1e-4
+  end
+end
+
+
+subsection Time stepping
+  set List of model names = function, convection time step
+
+  subsection Function
+    set Function expression = 1e3
+  end
+end
+
+
+subsection Postprocess
+  set List of postprocessors = velocity statistics, topography, visualization
+
+  subsection Topography
+    set Output to file = true
+    set Time between text output = 10e3
+  end
+  
+  subsection Visualization
+    set List of output variables = strain rate
+    set Time between graphical output = 10e3
+  end
+end
