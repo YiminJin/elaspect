@@ -58,7 +58,7 @@ FILE(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" ELASPECT_PACKAGE_VERSION LIMIT_COUNT 
 
 INCLUDE(CMakePackageConfigHelpers)
 WRITE_BASIC_PACKAGE_VERSION_FILE(
-  "${CMAKE_BINARY_DIR}/elAspectConfigVersion.cmake"
+  "${CMAKE_BINARY_DIR}/ElaspectConfigVersion.cmake"
   VERSION ${ELASPECT_PACKAGE_VERSION}
   COMPATIBILITY AnyNewerVersion
 )
@@ -69,8 +69,8 @@ WRITE_BASIC_PACKAGE_VERSION_FILE(
 SET(CONFIG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/include")
 SET(CONFIG_DIR "${CMAKE_BINARY_DIR}")
 CONFIGURE_FILE(
-  ${CMAKE_SOURCE_DIR}/cmake/elAspectConfig.cmake.in
-  ${CMAKE_BINARY_DIR}/elAspectConfig.cmake
+  ${CMAKE_SOURCE_DIR}/cmake/ElaspectConfig.cmake.in
+  ${CMAKE_BINARY_DIR}/ElaspectConfig.cmake
   @ONLY
 )
 
@@ -78,8 +78,8 @@ CONFIGURE_FILE(
 SET(CONFIG_INCLUDE_DIRS "${CMAKE_INSTALL_PREFIX}/include")
 SET(CONFIG_DIR "${CMAKE_INSTALL_PREFIX}/bin")
 CONFIGURE_FILE(
-  ${CMAKE_SOURCE_DIR}/cmake/elAspectConfig.cmake.in
-  ${CMAKE_BINARY_DIR}/forinstall/elAspectConfig.cmake
+  ${CMAKE_SOURCE_DIR}/cmake/ElaspectConfig.cmake.in
+  ${CMAKE_BINARY_DIR}/forinstall/ElaspectConfig.cmake
   @ONLY
   )
 
@@ -253,5 +253,5 @@ INSTALL(DIRECTORY include/
   FILES_MATCHING PATTERN "*.h")
 
 # cmake stuff:
-INSTALL(FILES ${CMAKE_BINARY_DIR}/forinstall/elAspectConfig.cmake ${CMAKE_BINARY_DIR}/elAspectConfigVersion.cmake
-        DESTINATION "lib/cmake/elAspect/")
+INSTALL(FILES ${CMAKE_BINARY_DIR}/forinstall/ElaspectConfig.cmake ${CMAKE_BINARY_DIR}/ElaspectConfigVersion.cmake
+        DESTINATION "lib/cmake/Elaspect/")
