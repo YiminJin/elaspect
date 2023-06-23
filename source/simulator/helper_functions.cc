@@ -279,71 +279,6 @@ const std::string tmp_file_name = stat_file_name + ".tmp";
 
   template <int dim>
   void
-  Simulator<dim>::interpolate_material_output_into_temperature_field ()
-  {
-    TrilinosWrappers::MPI::BlockVector 
-    distributed_vector (introspection.index_sets.system_partitioning, mpi_communicator);
-
-    pcout << "   Copying properties into prescribed temperature field." 
-          << std::endl;
-
-    const Quadrature<dim> quadrature (finite_element.base_element(introspection.base_elements.temperature).get_unit_support_points());
-
-    FEValues<dim> fe_values (*mapping, finite_element, quadrature,
-                             update_values | update_gradients | update_quadrature_points);
-
-    std::vector<types::global_dof_index> local_dof_indices (finite_element.dofs_per_cell);
-    
-    MaterialModel::MaterialProperties::Property requested_properties = MaterialModel::MaterialProperties::additional_outputs;
-    MaterialModel::FieldDependences::Dependence field_dependences = material_handler.get_field_dependences_for_evaluation(requested_properties);
-
-    MaterialModel::MaterialModelInputs<dim> in(quadrature.size(), introspection.n_compositional_fields, field_dependences, requested_properties);
-    MaterialModel::MaterialModelOutputs<dim> out(quadrature.size(), introspection.n_compositional_fields);
-
-    MaterialModel::PrescribedTemperatureOutputs<dim> *prescribed_temperature_out
-      = out.template get_additional_output<MaterialModel::PrescribedTemperatureOutputs<dim> >();
-    AssertThrow (prescribed_temperature_out != nullptr,
-                 ExcMessage("You are trying to use a prescribed temperature field, "
-                            "but the material model you use does not support interpolating properties "
-                            "(it does not create PrescribedTemperatureOutputs, which is required for this "
-                            "temperature evolution type)."))
-
-    for (const auto &cell : dof_handler.active_cell_iterators())
-      if (cell->is_locally_owned())
-      {
-        cell->get_dof_indices (local_dof_indices);
-
-        fe_values.reinit(cell);
-        in.reinit (fe_values, qpd_handler, introspection, solution);
-
-        material_handler.evaluate(in, out);
-
-        const unsigned int T_dofs_per_cell =
-          finite_element.base_element(introspection.base_elements.temperature).dofs_per_cell;
-
-        for (unsigned int j = 0; j < T_dofs_per_cell; ++j)
-        {
-          const unsigned int dof_idx =
-            finite_element.component_to_system_index(introspection.component_indices.temperature,
-                                                     /*dof index within component=*/ j);
-
-          // Skip degrees of freedom that are not locally owned. These
-          // will eventually be handled by one of the other processors.
-          if (dof_handler.locally_owned_dofs().is_element(local_dof_indices[dof_idx]))
-            distributed_vector(local_dof_indices[dof_idx])
-              = prescribed_temperature_out->prescribed_temperature[j];
-        }
-      }
-
-    const unsigned int T_block = introspection.block_indices.temperature;
-    distributed_vector.block(T_block).compress(VectorOperation::insert);
-    current_constraints.distribute (distributed_vector);
-    solution.block(T_block) = distributed_vector.block(T_block);
-  }
-
-
-  template <int dim>
-  void
   Simulator<dim>::apply_return_mapping()
   {
     AssertThrow(parameters.constitutive_relation & ConstitutiveRelation::plasticity,
@@ -955,7 +890,6 @@ namespace elaspect
   template void Simulator<dim>::maybe_write_timing_output () const; \
   template void Simulator<dim>::interpolate_onto_displacement_system(const TensorFunction<1,dim> &func, \
                                                                      TrilinosWrappers::MPI::Vector &vec); \
-  template void Simulator<dim>::interpolate_material_output_into_temperature_field (); \
   template void Simulator<dim>::apply_return_mapping(); \
   template void Simulator<dim>::update_quadrature_point_data(); \
   template void Simulator<dim>::advect_quadrature_point_data(); \

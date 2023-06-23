@@ -189,11 +189,24 @@ namespace elaspect
     SolverControl solver_control (parameters.thermo_system_max_linear_iterations, tolerance);
     solver_control.enable_history_data();
 
-    TrilinosWrappers::SolverCG solver (solver_control);
-    TrilinosWrappers::PreconditionJacobi preconditioner;
-    preconditioner.initialize (system_matrix.block(block_idx, block_idx));
+    std::unique_ptr<TrilinosWrappers::SolverBase> solver;
+    std::string solver_name;
+    if (parameters.use_ALE_method)
+    {
+      solver = std::make_unique<TrilinosWrappers::SolverGMRES>(solver_control);
+      solver_name = "GMRES";
+    }
+    else
+    {
+      solver = std::make_unique<TrilinosWrappers::SolverCG>(solver_control);
+      solver_name = "CG";
+    }
 
-    pcout << "   Solving thermal system... " << std::flush;
+    TrilinosWrappers::PreconditionILU preconditioner;
+    preconditioner.initialize(system_matrix.block(block_idx, block_idx));
+
+    pcout << "   Solving thermal system with " << solver_name 
+          << " solver... " << std::flush;
 
     TrilinosWrappers::MPI::BlockVector
     distributed_solution (introspection.index_sets.system_partitioning, mpi_communicator);
@@ -202,7 +215,7 @@ namespace elaspect
 
     try
     {
-      solver.solve (system_matrix.block(block_idx, block_idx),
+      solver->solve(system_matrix.block(block_idx, block_idx),
                     distributed_solution.block(block_idx),
                     system_rhs.block(block_idx),
                     preconditioner);

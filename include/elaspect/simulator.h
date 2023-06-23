@@ -264,8 +264,6 @@ namespace elaspect
       interpolate_onto_displacement_system(const TensorFunction<1,dim> &func,
                                            TrilinosWrappers::MPI::Vector &vec);
 
-      void interpolate_material_output_into_temperature_field ();
-
       void advect_quadrature_point_data();
 
       void refresh_quadrature_point_data();

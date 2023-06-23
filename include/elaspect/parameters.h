@@ -88,16 +88,6 @@ namespace elaspect
       };
     };
 
-    struct HeatTransport
-    {
-      enum Kind
-      {
-        none,
-        prescribed,
-        convection_diffusion
-      };
-    };
-
     Parameters (ParameterHandler &prm,
                 const MPI_Comm mpi_communicator);
 
@@ -113,7 +103,6 @@ namespace elaspect
     typename ConstitutiveRelation::Component constitutive_relation;
 
     typename NullspaceRemoval::Kind nullspace_removal;
-    typename HeatTransport::Kind    heat_transport;
 
     MaterialModel::MaterialAveraging::AveragingOperation material_averaging;
 
@@ -122,6 +111,7 @@ namespace elaspect
     double                      start_time;
     unsigned int                timing_output_frequency;
     bool                        use_ALE_method;
+    bool                        include_heat_transport;
     double                      CFL_number;
     bool                        run_postprocessors_on_initial_refinement;
     bool                        run_postprocessors_on_nonlinear_iterations;

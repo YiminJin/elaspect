@@ -103,14 +103,6 @@ namespace elaspect
 
         for (unsigned int i = 0; i < T_dofs_per_cell; ++i)
         {
-          data.local_rhs(i) 
-          += ((scratch.phi_T[i] * scratch.old_temperature_values[q]
-               * (density_c_P + latent_heat_LHS))
-               + 
-               (time_step * scratch.phi_T[i] 
-                * scratch.heating_model_outputs.heating_source_terms[q])
-             )
-             * JxW;
           data.local_rhs(i)
           += (scratch.phi_T[i]
               *

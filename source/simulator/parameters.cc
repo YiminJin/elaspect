@@ -69,6 +69,10 @@ namespace elaspect
                        Patterns::Bool(),
                        "");
 
+    prm.declare_entry ("Include heat transport", "false",
+                       Patterns::Bool(),
+                       "");
+
     prm.declare_entry ("CFL number", "1.0",
                        Patterns::Double(0),
                        "");
@@ -84,10 +88,6 @@ namespace elaspect
                          "A user-defined name for each of the compositional fields requested.");
     }
     prm.leave_subsection();
-
-    prm.declare_entry ("Heat transport", "none",
-                       Patterns::Selection("none|prescribed|convection diffusion"),
-                       "");
 
     prm.enter_subsection("Solver parameters");
     {
@@ -450,6 +450,7 @@ namespace elaspect
     start_time              = prm.get_double ("Start time");
     timing_output_frequency = prm.get_integer ("Timing output frequency");
     use_ALE_method          = prm.get_bool ("Use ALE method");
+    include_heat_transport  = prm.get_bool ("Include heat transport");
     CFL_number              = prm.get_double ("CFL number");
 
     prm.enter_subsection("Compositional fields");
@@ -488,18 +489,6 @@ namespace elaspect
           names_of_compositional_fields.push_back("C_" + Utilities::int_to_string(i+1));
     }
     prm.leave_subsection();
-
-    {
-      const std::string x_heat_transport = prm.get("Heat transport");
-      if (x_heat_transport == "none")
-        heat_transport = HeatTransport::none;
-      else if (x_heat_transport == "prescribed")
-        heat_transport = HeatTransport::prescribed;
-      else if (x_heat_transport == "convection_diffusion")
-        heat_transport = HeatTransport::convection_diffusion;
-      else
-        AssertThrow (false, ExcNotImplemented());
-    }
 
     prm.enter_subsection("Solver parameters");
     {

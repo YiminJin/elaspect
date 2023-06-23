@@ -69,6 +69,8 @@ namespace elaspect
     initialize_simulator(*this, assemblers->qpd_system);
     initialize_simulator(*this, assemblers->qpd_system_on_boundary_face);
     initialize_simulator(*this, assemblers->qpd_system_on_interior_face);
+    initialize_simulator(*this, assemblers->thermo_system);
+    initialize_simulator(*this, assemblers->thermo_system_on_boundary_face);
   }
 
 
@@ -352,7 +354,12 @@ namespace elaspect
     const UpdateFlags update_flags = update_values |
                                      update_gradients |
                                      update_quadrature_points |
-                                     update_JxW_values;
+                                     update_JxW_values |
+                                     (parameters.use_ALE_method 
+                                      ?
+                                      update_hessians 
+                                      :
+                                      update_default);
 
     const UpdateFlags face_update_flags =
       (!assemblers->thermo_system_on_boundary_face.empty()

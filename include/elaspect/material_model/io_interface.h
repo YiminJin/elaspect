@@ -227,20 +227,6 @@ namespace elaspect
         virtual ~AdditionalMaterialOutputs () = default;
     };
 
-    template <int dim>
-    class PrescribedTemperatureOutputs : public AdditionalMaterialOutputs<dim>
-    {
-      public:
-        PrescribedTemperatureOutputs (const unsigned int n_points)
-          : prescribed_temperature (n_points, numbers::signaling_nan<double>())
-        {}
-
-        ~PrescribedTemperatureOutputs () override
-        {}
-
-        std::vector<double> prescribed_temperature;
-    };
-
 
 // --------------------- template function definitions ----------------------------------
 

@@ -89,6 +89,9 @@ namespace elaspect
           old_temperature_values(quadrature.size(), numbers::signaling_nan<double>()),
           fluid_pressure_gradients(quadrature.size(), numbers::signaling_nan<Tensor<1,dim>>()),
 
+          displacement_increments(quadrature.size(), numbers::signaling_nan<Tensor<1,dim>>()),
+          mesh_displacement_increments(quadrature.size(), numbers::signaling_nan<Tensor<1,dim>>()),
+
           local_dof_indices(finite_element.dofs_per_cell),
 
           material_model_inputs(quadrature.size(), n_compositional_fields,
@@ -117,6 +120,8 @@ namespace elaspect
           laplacian_phi_T(scratch.laplacian_phi_T),
           old_temperature_values(scratch.old_temperature_values),
           fluid_pressure_gradients(scratch.fluid_pressure_gradients),
+          displacement_increments(scratch.displacement_increments),
+          mesh_displacement_increments(scratch.mesh_displacement_increments),
           local_dof_indices(scratch.local_dof_indices),
           material_model_inputs(scratch.material_model_inputs),
           material_model_outputs(scratch.material_model_outputs),

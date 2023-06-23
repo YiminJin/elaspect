@@ -6,22 +6,10 @@ namespace elaspect
   void
   Simulator<dim>::assemble_and_solve_thermo_system ()
   {
-    switch (parameters.heat_transport)
+    if (parameters.include_heat_transport)
     {
-      case Parameters<dim>::HeatTransport::none:
-        break;
-
-      case Parameters<dim>::HeatTransport::prescribed:
-        interpolate_material_output_into_temperature_field();
-        break;
-
-      case Parameters<dim>::HeatTransport::convection_diffusion:
-        assemble_thermo_system();
-        solve_thermo_system();
-        break;
-
-      default:
-        Assert (false, ExcNotImplemented());
+      assemble_thermo_system();
+      solve_thermo_system();
     }
   }
 
