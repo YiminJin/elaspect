@@ -223,7 +223,7 @@ namespace elaspect
       for (unsigned int d = 0; d < dim; ++d)
         coupling[x.displacement[c]][x.displacement[d]] = DoFTools::always;
 
-    if (parameters.heat_transport == Parameters<dim>::HeatTransport::convection_diffusion)
+    if (parameters.include_heat_transport)
       coupling[x.temperature][x.temperature] = DoFTools::always;
 
     if (x.compositional_fields.size() > 0)
@@ -857,6 +857,25 @@ start_time_iteration:
       {
         start_timestep();
 
+        if (timestep_number > 0)
+        {
+          // Update the mesh deformation handler and execute mesh deformation.
+          mesh_deformation_handler.execute();
+          
+          // calculate global volume after deforming mesh
+          global_volume = GridTools::volume(triangulation, *mapping);
+
+          // Update the data stored on quadrature points and project/advect them
+          // onto/across grid nodes.
+          update_quadrature_point_data();
+          assemble_and_solve_qpd_system();
+          refresh_quadrature_point_data();
+
+          // Solve the thermo- and hydro-system.
+          assemble_and_solve_thermo_system();
+          assemble_and_solve_hydro_system();
+        }
+
         do
         {
           // Solve the mechanical system and check the convergence.
@@ -908,26 +927,10 @@ start_time_iteration:
           goto start_time_iteration;
       }
 
-      // Update the mesh deformation handler and execute mesh deformation.
-      mesh_deformation_handler.execute();
-      
-      // calculate global volume after deforming mesh
-      global_volume = GridTools::volume(triangulation, *mapping);
-
-      // Update the data stored on quadrature points and project/advect them
-      // onto/across grid nodes.
-      update_quadrature_point_data();
-      assemble_and_solve_qpd_system();
-      refresh_quadrature_point_data();
-
-      // Solve the thermo- and hydro-system.
-      assemble_and_solve_thermo_system();
-      assemble_and_solve_hydro_system();
-
       pcout << std::endl;
 
       // If we postprocess nonlinear iterations, this function is called within
-      // solve_timestep() in the individual solver schemes
+      // assemble_and_solve_mechanical_system() in the individual solver schemes
       if (!parameters.run_postprocessors_on_nonlinear_iterations)
         postprocess();
 
