@@ -63,6 +63,10 @@ namespace elaspect
       // only open the log file on processor 0, the other processors won't be
       // writing into the stream anyway
       log_file_stream.open((parameters.output_directory + "log.txt").c_str(), std::ios_base::out);
+
+      // we already printed the header to the screen, so here we just dump it
+      // into the log file.
+      print_elaspect_header(log_file_stream);
     }
 
     // now that we have output set up, we can start timer sections
@@ -360,6 +364,7 @@ namespace elaspect
       mesh_deformation_handler.mesh_displacements);
 
     mesh_deformation_handler.setup_dofs();
+    pcout << std::endl;
 
     // Reconstruct the constraint-matrix:
     constraints.clear();
@@ -857,25 +862,6 @@ start_time_iteration:
       {
         start_timestep();
 
-        if (timestep_number > 0)
-        {
-          // Update the mesh deformation handler and execute mesh deformation.
-          mesh_deformation_handler.execute();
-          
-          // calculate global volume after deforming mesh
-          global_volume = GridTools::volume(triangulation, *mapping);
-
-          // Update the data stored on quadrature points and project/advect them
-          // onto/across grid nodes.
-          update_quadrature_point_data();
-          assemble_and_solve_qpd_system();
-          refresh_quadrature_point_data();
-
-          // Solve the thermo- and hydro-system.
-          assemble_and_solve_thermo_system();
-          assemble_and_solve_hydro_system();
-        }
-
         do
         {
           // Solve the mechanical system and check the convergence.
@@ -918,6 +904,8 @@ start_time_iteration:
         while (true);
       }
 
+      pcout << std::endl;
+
       // See if we have to start over with a new adaptive refinement cycle
       // at the beginning of the simulation.
       if (timestep_number == 0)
@@ -927,15 +915,31 @@ start_time_iteration:
           goto start_time_iteration;
       }
 
-      pcout << std::endl;
-
       // If we postprocess nonlinear iterations, this function is called within
       // assemble_and_solve_mechanical_system() in the individual solver schemes
       if (!parameters.run_postprocessors_on_nonlinear_iterations)
         postprocess();
 
+      // Update the mesh deformation handler and execute mesh deformation.
+      mesh_deformation_handler.execute();
+      
+      // calculate global volume after deforming mesh
+      global_volume = GridTools::volume(triangulation, *mapping);
+
+      // Update the data stored on quadrature points and project/advect them
+      // onto/across grid nodes.
+      update_quadrature_point_data();
+      assemble_and_solve_qpd_system();
+      refresh_quadrature_point_data();
+
+      // Solve the thermo- and hydro-system.
+      assemble_and_solve_thermo_system();
+      assemble_and_solve_hydro_system();
+
+      pcout << std::endl;
+
       // see if we need to refine the mesh
-      maybe_refine_mesh (max_refinement_level);
+      maybe_refine_mesh(max_refinement_level);
 
       // see if we want to write a timing summary
       maybe_write_timing_output();
