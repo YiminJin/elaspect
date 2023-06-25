@@ -33,7 +33,10 @@ namespace elaspect
       if (use_spherical_unit_vectors)
         velocity = Utilities::Coordinates::spherical_to_cartesian_vector(velocity, position);
 
-      return velocity;
+      if (this->convert_output_to_years())
+        return velocity / year_in_seconds;
+      else
+        return velocity;
     }
 
 

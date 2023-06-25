@@ -22,9 +22,9 @@ namespace elaspect
                                  std::vector<Vector<double>> &computed_quantities) const override
           {
             const unsigned int n_q_points = input_data.solution_values.size();
-            const double one_over_dt = 1. / ( this->get_timestep() * 
-                                              ( this->convert_output_to_years() ? 
-                                                year_in_seconds : 1. ) );
+            const double one_over_dt = 
+              1. / (this->get_timestep() / 
+                    (this->convert_output_to_years() ? year_in_seconds : 1.));
 
             for (unsigned int q = 0; q < n_q_points; ++q)
               for (unsigned int i = 0; i < computed_quantities[q].size(); ++i)
