@@ -1123,13 +1123,6 @@ namespace elaspect
 
           old_topography_spatial = topography_spatial;
         }
-
-        DataOut<surface_dim> data_out;
-        data_out.attach_dof_handler(topo_spatial_dof_handler);
-        data_out.add_data_vector(topography_spatial, "topo_spatial");
-        data_out.build_patches();
-        std::ofstream output("topography_spatial-" + Utilities::int_to_string(this->get_timestep_number()) + ".vtu");
-        data_out.write_vtu(output);
       }
 
 

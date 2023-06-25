@@ -334,8 +334,8 @@ namespace elaspect
                               "Assemble thermo system");
 
     const unsigned int block_idx = introspection.block_indices.temperature;
-    system_rhs.block (block_idx) = 0;
-    system_matrix.block (block_idx, block_idx) = 0;
+    system_rhs.block(block_idx) = 0;
+    system_matrix.block(block_idx, block_idx) = 0;
 
     auto worker = [&](const typename DoFHandler<dim>::active_cell_iterator &cell,
                       internal::Assembly::Scratch::ThermoSystem<dim> &scratch,
@@ -398,19 +398,19 @@ namespace elaspect
         worker,
         copier,
         internal::Assembly::Scratch::ThermoSystem<dim>(finite_element,
-                                                        *mapping,
-                                                        quadrature_formula,
-                                                        face_quadrature_formula,
-                                                        update_flags,
-                                                        face_update_flags,
-                                                        T_dofs_per_cell,
-                                                        parameters.n_compositional_fields,
-                                                        field_dependences,
-                                                        requested_properties),
-        internal::Assembly::CopyData::ThermoSystem<dim> (T_dofs_per_cell));
+                                                       *mapping,
+                                                       quadrature_formula,
+                                                       face_quadrature_formula,
+                                                       update_flags,
+                                                       face_update_flags,
+                                                       T_dofs_per_cell,
+                                                       parameters.n_compositional_fields,
+                                                       field_dependences,
+                                                       requested_properties),
+        internal::Assembly::CopyData::ThermoSystem<dim>(T_dofs_per_cell));
 
-    system_matrix.compress (VectorOperation::add);
-    system_rhs.compress (VectorOperation::add);
+    system_matrix.block(block_idx, block_idx).compress(VectorOperation::add);
+    system_rhs.block(block_idx).compress(VectorOperation::add);
   }
 
 

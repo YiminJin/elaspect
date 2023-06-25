@@ -235,8 +235,8 @@ namespace elaspect
     namespace Viscosity
     {
       ELASPECT_REGISTER_VISCOSITY_MODEL(DiffusionDislocation,
-                                    "diffusion dislocation",
-                                    "");
+                                        "diffusion dislocation",
+                                        "")
     }
   }
 }
