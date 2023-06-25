@@ -51,9 +51,20 @@ namespace elaspect
   class QuietException {};
 }
 
+/**
+ * Print a header into the given stream that will be written both to screen
+ * and to the log file and that provides basic information about what is
+ * running and with how many processes.
+ */
 template <class Stream>
 void print_elaspect_header(Stream &stream);
 
+/**
+ * A macro that is used in instantiating the elASPECT classes and functions for
+ * both 2d and 3d. Call this macro with the name of another macro that when
+ * called with a single integer argument instantiates the respective classes
+ * in the given space dimension.
+ */
 #define ELASPECT_INSTANTIATE(INSTANTIATIONS) \
   INSTANTIATIONS(2) \
   INSTANTIATIONS(3)
