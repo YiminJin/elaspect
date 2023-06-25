@@ -394,7 +394,12 @@ int main (int argc, char *argv[])
 
     deallog.depth_console(0);
 
-    if (Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) != 0)
+    if (Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
+    {
+      // Output header
+      print_elaspect_header(std::cout);
+    }
+    else
     {
       // We hook into the abort handler on ranks != 0 to avoid an MPI
       // deadlock. The deal.II library will call std::abort() when an
@@ -511,4 +516,6 @@ int main (int argc, char *argv[])
               << std::endl;
     return 1;
   }
+
+  return 0;
 }
