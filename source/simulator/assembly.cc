@@ -412,7 +412,6 @@ namespace elaspect
   template <int dim>
   void Simulator<dim>::assemble_thermo_system ()
   {
-    pcout << "calling assemble_thermo_system()" << std::endl;
     TimerOutput::Scope timer (computing_timer,
                               "Assemble thermo system");
 
@@ -495,8 +494,6 @@ namespace elaspect
                                                        requested_properties),
         internal::Assembly::CopyData::ThermoSystem<dim>(T_dofs_per_cell,
                                                         parameters.use_ALE_method));
-
-    std::cout << "P" << Utilities::MPI::this_mpi_process(mpi_communicator) << ": work stream completed" << std::endl;
 
     system_matrix.block(block_idx, block_idx).compress(VectorOperation::add);
     system_rhs.block(block_idx).compress(VectorOperation::add);
