@@ -261,6 +261,9 @@ namespace elaspect
                                                 introspection.n_components);
       face_coupling.fill(DoFTools::none);
 
+      if (parameters.include_heat_transport)
+        face_coupling[x.temperature][x.temperature] = DoFTools::always;
+
       if (x.compositional_fields.size() > 0)
         face_coupling[x.compositional_fields[0]][x.compositional_fields[0]] = DoFTools::always;
 
@@ -433,27 +436,36 @@ namespace elaspect
     boundary_temperature_manager.update();
     boundary_heat_flux->update();
 
-    // obtain the boundary indicators that belong to Dirichlet-type
-    // temperature boundary conditions and interpolate the temperature
-    // there
-    for (const auto p : boundary_temperature_manager.get_fixed_temperature_boundary_indicators())
+    // Do the same for compositional fields.
+    boundary_composition_manager.update();
+
+    // If ALE method is applied, then both temperature and compositional
+    // fields are discretized with discontinuous FE and boundary conditions
+    // are not handled with AffineConstraints.
+    if (!parameters.use_ALE_method)
     {
-      auto lambda = [&] (const Point<dim> &x) -> double
+      // obtain the boundary indicators that belong to Dirichlet-type
+      // temperature boundary conditions and interpolate the temperature
+      // there
+      for (const auto p : boundary_temperature_manager.get_fixed_temperature_boundary_indicators())
       {
-        return boundary_temperature_manager.boundary_temperature(p, x);
-      };
+        auto lambda = [&] (const Point<dim> &x) -> double
+        {
+          return boundary_temperature_manager.boundary_temperature(p, x);
+        };
 
-      VectorFunctionFromScalarFunctionObject<dim> vector_function_object(
-        lambda,
-        introspection.component_masks.temperature.first_selected_component(),
-        introspection.n_components);
+        VectorFunctionFromScalarFunctionObject<dim> vector_function_object(
+          lambda,
+          introspection.component_masks.temperature.first_selected_component(),
+          introspection.n_components);
 
-      VectorTools::interpolate_boundary_values (*mapping,
-                                                dof_handler,
-                                                p,
-                                                vector_function_object,
-                                                new_current_constraints,
-                                                introspection.component_masks.temperature);
+        VectorTools::interpolate_boundary_values (*mapping,
+                                                  dof_handler,
+                                                  p,
+                                                  vector_function_object,
+                                                  new_current_constraints,
+                                                  introspection.component_masks.temperature);
+      }
     }
 
     new_current_constraints.close();

@@ -17,7 +17,7 @@ void print_elaspect_header(Stream &stream)
          << "-- This is elASPECT, the elasticity-based ASPECT.\n";
 
   stream << "--     . using deal.II " << DEAL_II_PACKAGE_VERSION << "\n"
-         << "--     .       with"
+         << "--     .       with "
 #ifdef DEAL_II_WITH_64BIT_INDICES
          << "64"
 #else

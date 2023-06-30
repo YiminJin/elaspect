@@ -122,7 +122,7 @@ namespace elaspect
 
     template <int dim>
     void
-    MaterialModelInputs<dim>::reinit (const FEValues<dim>                       &fe_values,
+    MaterialModelInputs<dim>::reinit (const FEValuesBase<dim>                   &fe_values,
                                       const QPDHandler<dim>                     &qpd_handler,
                                       const Introspection<dim>                  &introspection,
                                       const TrilinosWrappers::MPI::BlockVector  &solution)
@@ -145,25 +145,47 @@ namespace elaspect
         fe_values[fp_extractor].get_function_values (solution, fluid_pressure);
       }
 
-      // get quadrature point data directly from QPDHandler
-      qpd_cell = typename QPDHandler<dim>::active_cell_iterator(*fe_values.get_cell(),
-                                                                &qpd_handler);
-
-      if (field_dependences & FieldDependences::composition)
+      if (dynamic_cast<const FEValues<dim>*>(&fe_values) != nullptr)
       {
-        std::vector<double> component_values(fe_values.n_quadrature_points);
-        for (unsigned int i = 0; i < introspection.n_compositional_fields; ++i)
+        AssertDimension(fe_values.n_quadrature_points, qpd_handler.n_quadrature_points());
+
+        // get quadrature point data directly from QPDHandler
+        qpd_cell = typename QPDHandler<dim>::active_cell_iterator(*fe_values.get_cell(),
+                                                                  &qpd_handler);
+
+        if (field_dependences & FieldDependences::composition)
         {
-          qpd_cell->get(introspection.qpd_indicators.composition + i, component_values);
+          std::vector<double> component_values(fe_values.n_quadrature_points);
+          for (unsigned int i = 0; i < introspection.n_compositional_fields; ++i)
+          {
+            qpd_cell->get(introspection.qpd_indicators.composition + i, component_values);
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              composition[q][i] = component_values[q];
+          }
+        }
+
+        if (field_dependences & FieldDependences::old_stress)
+        {
           for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
-            composition[q][i] = component_values[q];
+            old_stress[q] = qpd_cell->get_symmetric_tensor(q, introspection.qpd_indicators.old_stress);
         }
       }
-
-      if (field_dependences & FieldDependences::old_stress)
+      else
       {
-        for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
-          old_stress[q] = qpd_cell->get_symmetric_tensor(q, introspection.qpd_indicators.old_stress);
+        // get quadrature point data from the finite element space
+        if (field_dependences & FieldDependences::composition)
+        {
+          std::vector<double> component_values(fe_values.n_quadrature_points);
+          for (unsigned int i = 0; i < introspection.n_compositional_fields; ++i)
+          {
+            fe_values[introspection.extractors.compositional_fields[i]].get_function_values(solution, component_values);
+            for (unsigned int q = 0; q < fe_values.n_quadrature_points; ++q)
+              composition[q][i] = component_values[q];
+          }
+        }
+
+        if (field_dependences & FieldDependences::old_stress)
+          fe_values[introspection.extractors.stress].get_function_values(solution, old_stress);
       }
     }
 

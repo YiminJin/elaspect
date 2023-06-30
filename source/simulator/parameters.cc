@@ -322,6 +322,14 @@ namespace elaspect
                         "The threshold $C_k$ in KXRCF indicator. In the WENO limiting procedure, "
                         "a cell is marked as troubled cell if its indicating quantity for KXRCF "
                         "is greater than $C_k$.");
+
+      prm.declare_entry ("Discontinuous penalty", "10.",
+                         Patterns::Double (0.),
+                         "The value used to penalize discontinuities for the temperature field "
+                         "when ALE method is applied. This is largely empirically decided -- "
+                         "it must be large enough to ensure the bilinear form is coercive, but "
+                         "not so large as to penalize discontinuity at all costs.");
+
     }
     prm.leave_subsection();
 
@@ -623,6 +631,8 @@ namespace elaspect
         Utilities::string_to_double(Utilities::split_string_list(prm.get("Global composition minimum"))),
         n_compositional_fields,
         "Global composition minimum");
+
+      discontinuous_penalty = prm.get_double("Discontinuous penalty");
     }
     prm.leave_subsection();
 

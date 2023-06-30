@@ -253,6 +253,14 @@ namespace elaspect
 
 
   template <int dim>
+  const HeatingModel::Manager<dim> &
+  SimulatorAccess<dim>::get_heating_model_manager() const
+  {
+    return simulator->heating_model_manager;
+  }
+
+
+  template <int dim>
   const GravityModel::Interface<dim> &
   SimulatorAccess<dim>::get_gravity_model () const
   {

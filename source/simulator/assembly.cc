@@ -35,20 +35,14 @@ namespace elaspect
     // first let the manager delete all existing assemblers:
     assemblers->reset();
 
-    assemblers->thermo_system.push_back(std::make_unique<Assemblers::ThermoConvectionDiffusion<dim>>());
-    if (parameters.fixed_heat_flux_boundary_indicators.size() > 0)
-      assemblers->thermo_system.push_back(std::make_unique<Assemblers::ThermoBoundaryFlux<dim>>());
-
-    if (parameters.constitutive_relation & ConstitutiveRelation::pore_fluid)
-      assemblers->hydro_system.push_back(std::make_unique<Assemblers::HydroUnsaturatedFlow<dim>>());
-
+    // add terms for mechanical system 
     assemblers->mechanical_system.push_back(std::make_unique<Assemblers::MechanicalQuasiStaticTerms<dim>>());
 
-    // add the terms for traction boundary conditions
     if (!boundary_traction.empty())
       assemblers->mechanical_system_on_boundary_face.push_back(
         std::make_unique<Assemblers::MechanicalBoundaryTraction<dim>>());
 
+    // add terms for QPD system
     if (parameters.use_ALE_method)
     {
       assemblers->qpd_system.push_back(std::make_unique<Assemblers::QPDAdvection<dim>>());
@@ -59,6 +53,23 @@ namespace elaspect
     }
     else
       assemblers->qpd_system.push_back(std::make_unique<Assemblers::QPDProjection<dim>>());
+
+    // add terms for thermo system
+    assemblers->thermo_system.push_back(std::make_unique<Assemblers::ThermoConvectionDiffusion<dim>>());
+    if (parameters.use_ALE_method)
+    {
+      assemblers->thermo_system_on_boundary_face.push_back(
+        std::make_unique<Assemblers::ThermoSystemBoundaryFace<dim>>());
+      assemblers->thermo_system_on_interior_face.push_back(
+        std::make_unique<Assemblers::ThermoSystemInteriorFace<dim>>());
+    }
+    if (parameters.fixed_heat_flux_boundary_indicators.size() > 0)
+      assemblers->thermo_system_on_boundary_face.push_back(
+        std::make_unique<Assemblers::ThermoBoundaryFlux<dim>>());
+
+    // add terms for hydro system
+    if (parameters.constitutive_relation & ConstitutiveRelation::pore_fluid)
+      assemblers->hydro_system.push_back(std::make_unique<Assemblers::HydroUnsaturatedFlow<dim>>());
 
     // allow other assemblers to add themselves or modify the existing ones by firing the signal
     signals.set_assemblers(*this, *assemblers);
@@ -71,6 +82,7 @@ namespace elaspect
     initialize_simulator(*this, assemblers->qpd_system_on_interior_face);
     initialize_simulator(*this, assemblers->thermo_system);
     initialize_simulator(*this, assemblers->thermo_system_on_boundary_face);
+    initialize_simulator(*this, assemblers->thermo_system_on_interior_face);
   }
 
 
@@ -293,21 +305,63 @@ namespace elaspect
     data.local_matrix = 0;
     data.local_rhs = 0;
     
+    // trigger the invocation of the various functions that actually do
+    // all of the assembling
     for (unsigned int i = 0; i < assemblers->thermo_system.size(); ++i)
       assemblers->thermo_system[i]->execute(scratch, data);
 
-    if (!assemblers->thermo_system_on_boundary_face.empty())
-    {
-      for (unsigned int face_number = 0; face_number < GeometryInfo<dim>::faces_per_cell; ++face_number)
-      {
-        const typename DoFHandler<dim>::face_iterator face = cell->face(face_number);
-        if (face->at_boundary())
-        {
-          scratch.fe_face_values.reinit(cell, face_number);
-          scratch.face_number = face_number;
+    // then also work on possible face terms
+    const bool has_boundary_face_assemblers = !assemblers->thermo_system_on_boundary_face.empty(),
+               has_interior_face_assemblers = !assemblers->thermo_system_on_interior_face.empty();
 
-          for (unsigned int i = 0; i < assemblers->thermo_system_on_boundary_face.size(); ++i)
-            assemblers->thermo_system_on_boundary_face[i]->execute (scratch, data);
+    if (has_boundary_face_assemblers || has_interior_face_assemblers)
+    {
+      if (has_interior_face_assemblers)
+      {
+        // reset the matrices for interior face contributions
+        for (auto &m : data.local_matrices_int_ext)
+          m = 0;
+        for (auto &m : data.local_matrices_ext_int)
+          m = 0;
+        for (auto &m : data.local_matrices_ext_ext)
+          m = 0;
+
+        // mark the arrays initialized to zero above as currently all unused.
+        std::fill(data.assembled_matrices.begin(), data.assembled_matrices.end(), false);
+      }
+
+      for (const unsigned int face_no : cell->face_indices())
+      {
+        const typename DoFHandler<dim>::face_iterator face = cell->face(face_no);
+        if ((has_boundary_face_assemblers && face->at_boundary()) ||
+            (has_interior_face_assemblers && !face->at_boundary()))
+        {
+          scratch.fe_face_values->reinit(cell, face_no);
+          scratch.face_number = face_no;
+
+          (*scratch.fe_face_values)[introspection.extractors.displacement].get_function_values(
+            solution, scratch.face_displacement_increments);
+          (*scratch.fe_face_values)[introspection.extractors.displacement].get_function_values(
+            mesh_deformation_handler.mesh_displacement_increments, scratch.face_mesh_displacement_increments);
+
+          scratch.face_material_model_inputs.reinit(*scratch.fe_face_values,
+                                                    qpd_handler,
+                                                    introspection,
+                                                    solution);
+
+          material_handler.evaluate(scratch.face_material_model_inputs,
+                                    scratch.face_material_model_outputs);
+
+          heating_model_manager.evaluate(scratch.face_material_model_inputs,
+                                         scratch.face_material_model_outputs,
+                                         scratch.face_heating_model_outputs);
+
+          if (face->at_boundary() && !cell->has_periodic_neighbor(face_no))
+            for (unsigned int i = 0; i < assemblers->thermo_system_on_boundary_face.size(); ++i)
+              assemblers->thermo_system_on_boundary_face[i]->execute(scratch, data);
+          else
+            for (unsigned int i = 0; i < assemblers->thermo_system_on_interior_face.size(); ++i)
+              assemblers->thermo_system_on_interior_face[i]->execute(scratch, data);
         }
       }
     }
@@ -319,17 +373,46 @@ namespace elaspect
   Simulator<dim>::
   copy_local_to_global_thermo_system (const internal::Assembly::CopyData::ThermoSystem<dim> &data)
   {
+    // copy entries into the global matrix. note that these local contributions
+    // only correspond to the temperature dofs, as assembled above
     current_constraints.distribute_local_to_global (data.local_matrix,
                                                     data.local_rhs,
                                                     data.local_dof_indices,
                                                     system_matrix,
                                                     system_rhs);
+
+    // In the following, we copy DG constributions entry by entry. This
+    // is allowed since there are no constraints imposed on discontinuous fields.
+    if (!assemblers->thermo_system_on_interior_face.empty())
+    {
+      for (unsigned int f = 0; f < data.assembled_matrices.size(); ++f)
+        if (data.assembled_matrices[f])
+        {
+          for (unsigned int i = 0; i < data.local_dof_indices.size(); ++i)
+            for (unsigned int j = 0; j < data.neighbor_dof_indices[f].size(); ++j)
+              {
+                system_matrix.add (data.local_dof_indices[i],
+                                   data.neighbor_dof_indices[f][j],
+                                   data.local_matrices_int_ext[f](i, j));
+                system_matrix.add (data.neighbor_dof_indices[f][j],
+                                   data.local_dof_indices[i],
+                                   data.local_matrices_ext_int[f](j, i));
+              }
+
+          for (unsigned int i=0; i<data.neighbor_dof_indices[f].size(); ++i)
+            for (unsigned int j=0; j<data.neighbor_dof_indices[f].size(); ++j)
+              system_matrix.add (data.neighbor_dof_indices[f][i],
+                                 data.neighbor_dof_indices[f][j],
+                                 data.local_matrices_ext_ext[f](i, j));
+        }
+    }
   }
 
 
   template <int dim>
   void Simulator<dim>::assemble_thermo_system ()
   {
+    pcout << "calling assemble_thermo_system()" << std::endl;
     TimerOutput::Scope timer (computing_timer,
                               "Assemble thermo system");
 
@@ -337,39 +420,25 @@ namespace elaspect
     system_rhs.block(block_idx) = 0;
     system_matrix.block(block_idx, block_idx) = 0;
 
-    auto worker = [&](const typename DoFHandler<dim>::active_cell_iterator &cell,
-                      internal::Assembly::Scratch::ThermoSystem<dim> &scratch,
-                      internal::Assembly::CopyData::ThermoSystem<dim> &data)
-    {
-      this->local_assemble_thermo_system (cell, scratch, data);
-    };
-
-    auto copier = [&](const internal::Assembly::CopyData::ThermoSystem<dim> &data)
-    {
-      this->copy_local_to_global_thermo_system (data);
-    };
+    const bool allocate_face_quadrature = (!assemblers->thermo_system_on_boundary_face.empty() ||
+                                           !assemblers->thermo_system_on_interior_face.empty());
 
     const QGauss<dim-1> face_quadrature_formula (parameters.n_gaussian_points);
 
     const UpdateFlags update_flags = update_values |
                                      update_gradients |
                                      update_quadrature_points |
-                                     update_JxW_values |
-                                     (parameters.use_ALE_method 
-                                      ?
-                                      update_hessians 
-                                      :
-                                      update_default);
+                                     update_JxW_values;
 
-    const UpdateFlags face_update_flags =
-      (!assemblers->thermo_system_on_boundary_face.empty()
-       ?
-       update_values |
-       update_quadrature_points |
-       update_normal_vectors |
-       update_JxW_values 
-       :
-       update_default);
+    const UpdateFlags face_update_flags = (allocate_face_quadrature 
+                                           ?
+                                           update_values |
+                                           update_gradients |
+                                           update_quadrature_points |
+                                           update_normal_vectors |
+                                           update_JxW_values
+                                           :
+                                           update_default);
 
     MaterialModel::FieldDependences::Dependence field_dependences = MaterialModel::FieldDependences::none;
     MaterialModel::MaterialProperties::Property requested_properties = MaterialModel::MaterialProperties::none;
@@ -384,11 +453,28 @@ namespace elaspect
       field_dependences    |= p->get_field_dependences();
       requested_properties |= p->get_needed_material_properties();
     }
+    for (const auto &p : assemblers->thermo_system_on_interior_face)
+    {
+      field_dependences    |= p->get_field_dependences();
+      requested_properties |= p->get_needed_material_properties();
+    }
     field_dependences |= material_handler.get_field_dependences_for_evaluation (requested_properties);
       
     const unsigned int T_dofs_per_cell = finite_element.base_element(introspection.base_elements.temperature).dofs_per_cell;
 
     using CellFilter = FilteredIterator<typename DoFHandler<dim>::active_cell_iterator>;
+
+    auto worker = [&](const typename DoFHandler<dim>::active_cell_iterator &cell,
+                      internal::Assembly::Scratch::ThermoSystem<dim> &scratch,
+                      internal::Assembly::CopyData::ThermoSystem<dim> &data)
+    {
+      this->local_assemble_thermo_system (cell, scratch, data);
+    };
+
+    auto copier = [&](const internal::Assembly::CopyData::ThermoSystem<dim> &data)
+    {
+      this->copy_local_to_global_thermo_system (data);
+    };
 
     WorkStream::
     run(CellFilter(IteratorFilters::LocallyOwnedCell(),
@@ -407,7 +493,10 @@ namespace elaspect
                                                        parameters.n_compositional_fields,
                                                        field_dependences,
                                                        requested_properties),
-        internal::Assembly::CopyData::ThermoSystem<dim>(T_dofs_per_cell));
+        internal::Assembly::CopyData::ThermoSystem<dim>(T_dofs_per_cell,
+                                                        parameters.use_ALE_method));
+
+    std::cout << "P" << Utilities::MPI::this_mpi_process(mpi_communicator) << ": work stream completed" << std::endl;
 
     system_matrix.block(block_idx, block_idx).compress(VectorOperation::add);
     system_rhs.block(block_idx).compress(VectorOperation::add);

@@ -155,6 +155,7 @@ namespace elaspect
     std::vector<double>         composition_min_preset;
     bool                        apply_WENO_limiter_to_physical_fields;
     double                      KXRCF_indicator_threshold;
+    double                      discontinuous_penalty;
 
     std::map<types::boundary_id, std::pair<std::string,std::string> > prescribed_traction_boundary_indicators;
 

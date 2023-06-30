@@ -110,6 +110,9 @@ namespace elaspect
 
       if (this->constitutive_relation() & ConstitutiveRelation::plasticity)
       {
+        // Return-mapping cannot be executed on faces or subfaces.
+        AssertDimension(n_points, this->get_qpd_handler().n_quadrature_points());
+
         // calculate the consistent tangent modulus
         sigma_old = in.old_stress[i];
         depsilon  = symmetrize(in.incremental_displacement_gradient[i]);
@@ -155,13 +158,16 @@ namespace elaspect
                        std::vector<double> &                          plastic_strains,
                        std::vector<double> &                          flags) const
   {
-    AssertThrow (this->constitutive_relation() & ConstitutiveRelation::plasticity,
-                 ExcMessage("MaterialModel::Interface<dim>::execute_return_mapping() "
-                            "should not be called when plasticity is not included in the "
-                            "constitutive relations."));
+    Assert(this->constitutive_relation() & ConstitutiveRelation::plasticity,
+           ExcMessage("MaterialModel::Interface<dim>::execute_return_mapping() "
+                      "should not be called when plasticity is not included in the "
+                      "constitutive relations."));
 
     const unsigned int n_fields = this->n_compositional_fields() + 1;
     const unsigned int n_points = in.n_evaluation_points();
+
+    // Return-mapping cannot be executed on faces or subfaces.
+    AssertDimension(n_points, this->get_qpd_handler().n_quadrature_points());
 
     MaterialModel::BasicPropertyOutputs<dim> basic_property_outputs(n_fields);
     std::vector<double> volume_fractions(n_fields);

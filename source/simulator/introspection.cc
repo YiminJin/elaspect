@@ -109,7 +109,8 @@ namespace elaspect
 
     variables.push_back(
       VariableDeclaration<dim>("temperature",
-                               std::make_shared<FE_Q<dim>>(parameters.temperature_degree),
+                               internal::new_FE_Q_or_DGQ<dim>(parameters.use_ALE_method,
+                                                              parameters.temperature_degree),
                                1,
                                1));
 

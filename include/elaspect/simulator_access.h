@@ -31,6 +31,11 @@ namespace elaspect
     template <int dim> class Interface;
   }
 
+  namespace HeatingModel
+  {
+    template <int dim> class Manager;
+  }
+
   namespace MaterialModel
   {
     template <int dim> class Interface;
@@ -179,6 +184,9 @@ namespace elaspect
 
       const InitialTopography::Interface<dim> &
       get_initial_topography () const;
+
+      const HeatingModel::Manager<dim> &
+      get_heating_model_manager() const;
 
       const GravityModel::Interface<dim> &
       get_gravity_model () const;

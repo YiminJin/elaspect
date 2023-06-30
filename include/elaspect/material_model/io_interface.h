@@ -147,7 +147,7 @@ namespace elaspect
                           const FieldDependences::Dependence         dependences,
                           const MaterialProperties::Property          requested_properties);
 
-      void reinit(const FEValues<dim>                       &fe_values,
+      void reinit(const FEValuesBase<dim>                   &fe_values,
                   const QPDHandler<dim>                     &qpd_handler,
                   const Introspection<dim>                  &introspection,
                   const TrilinosWrappers::MPI::BlockVector  &solution);
