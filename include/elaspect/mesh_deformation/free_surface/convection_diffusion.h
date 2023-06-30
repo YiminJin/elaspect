@@ -62,6 +62,20 @@ namespace elaspect
 
           void update_topography_in_material_coordinates();
 
+          double 
+          compute_artificial_viscosity(const std::vector<double> &               old_z_values,
+                                       const std::vector<double> &               old_old_z_values,
+                                       const std::vector<Tensor<1,surface_dim>> &old_z_grads,
+                                       const double                              old_z_laplacian,
+                                       const std::vector<Tensor<1,surface_dim>> &velocity_values,
+                                       const std::vector<double> &               uplift_rates,
+                                       const double                              global_u_infty,
+                                       const double                              global_z_variation,
+                                       const double                              global_z_average,
+                                       const double                              global_entropy_variation,
+                                       const double                              step_size,
+                                       const double                              cell_diameter) const;
+
           struct BoundaryFaceId
           {
             CellId       adjacent_cell;
@@ -100,6 +114,10 @@ namespace elaspect
             unsigned int  minimum_substep_number;
             double        diffusion_constant;
 
+            double        stabilization_c_R;
+            double        stabilization_alpha;
+            double        stabilization_beta;
+
             bool          smooth_surface_mesh;
             unsigned int  gradient_descent_iterations;
             double        gradient_descent_step_size;
@@ -113,6 +131,8 @@ namespace elaspect
           Triangulation<surface_dim> surface_mesh;
 
           Triangulation<surface_dim> interface_mesh;
+
+          double global_Omega_diameter;
 
           std::map<typename Triangulation<surface_dim>::active_cell_iterator, BoundaryFaceId>
           interface_to_volume_mapping;
@@ -138,6 +158,7 @@ namespace elaspect
           DoFHandler<surface_dim>                topo_spatial_dof_handler;
           Vector<double>                         topography_spatial;
           Vector<double>                         old_topography_spatial;
+          Vector<double>                         old_old_topography_spatial;
 
           FE_Q<surface_dim>                      topo_material_fe;
           DoFHandler<surface_dim>                topo_material_dof_handler;

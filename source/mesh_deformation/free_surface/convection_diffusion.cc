@@ -3,13 +3,14 @@
 #include <elaspect/initial_topography/interface.h>
 #include <elaspect/boundary_velocity/interface.h>
 
+#include <deal.II/grid/grid_tools.h>
 #include <deal.II/dofs/dof_tools.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/solver_gmres.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/numerics/vector_tools.h>
-#include <deal.II/numerics/data_out.h>
+#include <deal.II/numerics/derivative_approximation.h>
 
 namespace elaspect
 {
@@ -970,12 +971,73 @@ namespace elaspect
 
         // Solve the linear system.
         SolverControl solver_control(rhs.size(), 1e-8 * rhs.l2_norm());
-        SolverCG<Vector<double> > cg(solver_control);
+        SolverCG<Vector<double>> cg(solver_control);
 
-        PreconditionSSOR<SparseMatrix<double> > preconditioner;
+        PreconditionSSOR<SparseMatrix<double>> preconditioner;
         preconditioner.initialize(mass_matrix, 1.2);
 
         cg.solve(mass_matrix, surface_velocities, rhs, preconditioner);
+      }
+
+
+      template <int dim>
+      double 
+      ConvectionDiffusion<dim>::
+      compute_artificial_viscosity(const std::vector<double> &               old_z_values,
+                                   const std::vector<double> &               old_old_z_values,
+                                   const std::vector<Tensor<1,surface_dim>> &old_z_grads,
+                                   const double                              old_z_laplacian,
+                                   const std::vector<Tensor<1,surface_dim>> &velocity_values,
+                                   const std::vector<double> &               uplift_rates,
+                                   const double                              global_u_infty,
+                                   const double                              global_z_variation,
+                                   const double                              global_z_average,
+                                   const double                              global_entropy_variation,
+                                   const double                              step_size,
+                                   const double                              cell_diameter) const
+      {
+        if (global_u_infty < 1e-50)
+          return 0;
+
+        const unsigned int n_q_points = old_z_values.size();
+
+        double max_residual = 0;
+        double max_velocity = 0;
+
+        for (unsigned int q = 0; q < n_q_points; ++q)
+        {
+          const double u_grad_z = velocity_values[q] * old_z_grads[q];
+
+          const double dz_dt = (old_z_values[q] - old_old_z_values[q]) / step_size;
+
+          const double kappa_Delta_z = parameters.diffusion_constant * old_z_laplacian;
+
+          double residual = std::abs(dz_dt + u_grad_z - kappa_Delta_z - uplift_rates[q]);
+          if (parameters.stabilization_alpha == 2)
+            residual *= std::abs(old_z_values[q] - global_z_average);
+
+          max_residual = std::max(residual, max_residual);
+          max_velocity = std::max(velocity_values[q].norm(), max_velocity);
+        }
+
+        const double max_viscosity = (parameters.stabilization_beta * max_velocity * cell_diameter);
+        if (std::abs(global_entropy_variation) < 1e-50 ||
+            std::abs(global_z_variation) < 1e-50)
+          return max_viscosity;
+
+        double entropy_viscosity;
+        if (parameters.stabilization_alpha == 2)
+          entropy_viscosity = (parameters.stabilization_c_R *
+                               cell_diameter * cell_diameter *
+                               max_residual /
+                               global_entropy_variation);
+        else
+          entropy_viscosity = (parameters.stabilization_c_R *
+                               cell_diameter * global_Omega_diameter *
+                               max_velocity * max_residual /
+                               (global_u_infty * global_z_variation));
+
+        return std::min(max_viscosity, entropy_viscosity);
       }
 
 
@@ -1002,13 +1064,13 @@ namespace elaspect
         const unsigned int n_q_points    = topo_fe_values.n_quadrature_points;
         const unsigned int dofs_per_cell = topo_fe_values.dofs_per_cell;
 
-        std::vector<double> old_topo_values(n_q_points);
+        std::vector<double> old_z_values(n_q_points), old_old_z_values(n_q_points);
+        std::vector<Tensor<1,surface_dim>> old_z_grads(n_q_points);
         std::vector<Tensor<1,surface_dim>> velocity_values(n_q_points);
-        std::vector<double> uplift_rate_values(n_q_points);
+        std::vector<double> uplift_rates(n_q_points);
 
         std::vector<double> phi(dofs_per_cell);
         std::vector<Tensor<1,surface_dim>> grad_phi(dofs_per_cell);
-        std::vector<double> laplacian_phi(dofs_per_cell);
 
         std::vector<types::global_dof_index> cell_dof_indices(dofs_per_cell);
 
@@ -1017,6 +1079,56 @@ namespace elaspect
 
         for (unsigned int substep_number = 0; substep_number < n_substeps; ++substep_number)
         {
+          // get the global range of topography
+          std::pair<double, double> global_z_range;
+          global_z_range.first =  *std::min_element(old_topography_spatial.begin(),
+                                                    old_topography_spatial.end());
+          global_z_range.second = *std::max_element(old_topography_spatial.begin(),
+                                                    old_topography_spatial.end());
+
+          const double global_z_average = (global_z_range.first + global_z_range.second) / 2;
+
+          // get the entropy variation
+          double global_entropy_variation = numbers::signaling_nan<double>();
+          if (parameters.stabilization_alpha == 2)
+          {
+            double min_entropy = std::numeric_limits<double>::max(),
+                   max_entropy = -std::numeric_limits<double>::max(),
+                   area = 0,
+                   entropy_integrated = 0;
+
+            for (const auto &topo_cell : topo_spatial_dof_handler.active_cell_iterators())
+            {
+              topo_fe_values.reinit(topo_cell);
+              topo_fe_values.get_function_values(old_topography_spatial, old_z_values);
+              for (unsigned int q = 0; q < n_q_points; ++q)
+              {
+                const double entropy = (old_z_values[q] - global_z_average) *
+                                       (old_z_values[q] - global_z_average);
+
+                min_entropy = std::min(min_entropy, entropy);
+                max_entropy = std::max(max_entropy, entropy);
+                area += topo_fe_values.JxW(q);
+                entropy_integrated += topo_fe_values.JxW(q) * entropy;
+              }
+            }
+
+            const double average_entropy = entropy_integrated / area;
+            global_entropy_variation = std::max(max_entropy - average_entropy,
+                                                average_entropy - min_entropy);
+          }
+
+          // get the maximal velocity
+          double global_max_velocity = 0;
+          for (const auto &vel_cell : surface_vel_dof_handler.active_cell_iterators())
+          {
+            vel_fe_values.reinit(vel_cell);
+            vel_fe_values[u_extractor].get_function_values(surface_velocities, velocity_values);
+            
+            for (unsigned int q = 0; q < n_q_points; ++q)
+              global_max_velocity = std::max(global_max_velocity, velocity_values[q].norm());
+          }
+
           convection_diffusion_matrix = 0;
           convection_diffusion_rhs = 0;
 
@@ -1028,35 +1140,42 @@ namespace elaspect
           for (; topo_cell != topo_endc; ++topo_cell, ++vel_cell)
           {
             topo_fe_values.reinit(topo_cell);
-            topo_fe_values.get_function_values(old_topography_spatial, old_topo_values);
+            topo_fe_values.get_function_values(old_topography_spatial, old_z_values);
+            topo_fe_values.get_function_values(old_old_topography_spatial, old_old_z_values);
+            topo_fe_values.get_function_gradients(old_topography_spatial, old_z_grads);
             topo_cell->get_dof_indices(cell_dof_indices);
             
             vel_fe_values.reinit(vel_cell);
             vel_fe_values[u_extractor].get_function_values(surface_velocities, velocity_values);
-            vel_fe_values[r_extractor].get_function_values(surface_velocities, uplift_rate_values);
+            vel_fe_values[r_extractor].get_function_values(surface_velocities, uplift_rates);
 
-            // Compute the SUPG parameter tau defined in "On Discontinuity-Capturing 
-            // Methods for Convection-Diffusion Equations" by Volker John and Petr
-            // Knobloch. 
-            // delta_k = h / (2 \|u\| p) * (coth(Pe) - 1/Pe)
-            // Pe = \| u \| h/(2 p eps)
-            double u_norm = 0;
-            for (unsigned int q = 0; q < n_q_points; ++q)
-              u_norm = std::max(velocity_values[q].norm(), u_norm);
+            // compute the approximated laplacian of surface topography. we do not 
+            // use function get_function_laplacians() because in piecewise bilinear
+            // polynomial space the laplacian of shape function is always 0. note that
+            // the laplacian is used for computing the residual, which is necessary
+            // only when the diffusion constant is not 0.
+            Tensor<2,surface_dim> old_z_hessian;
+            if (parameters.diffusion_constant > 0)
+              DerivativeApproximation::approximate_derivative_tensor(topo_spatial_dof_handler,
+                                                                     old_topography_spatial,
+                                                                     topo_cell,
+                                                                     old_z_hessian);
+            const double old_z_laplacian = trace(old_z_hessian);
 
-            const double h = topo_cell->diameter();
-            const double eps = parameters.diffusion_constant;
-            const double peclet_times_eps = u_norm * h / 2.0;
-
-            double tau = 0;
-            // Instead of Pe < 1, we check Pe * eps < eps as eps can be 0:
-            if (!(peclet_times_eps == 0.0 || peclet_times_eps < eps))
-            {
-              // To avoid a division by zero, increase eps slightly.
-              const double peclet = peclet_times_eps / (eps + 1e-100);
-              const double coth_peclet = (1.0 + exp(-2.0 * peclet)) / (1.0 - exp(-2.0 * peclet));
-              tau = h / (2.0 * u_norm) * (coth_peclet - 1.0 / peclet);
-            }
+            // compute the artificial viscosity
+            const double artificial_viscosity =
+              compute_artificial_viscosity(old_z_values,
+                                           old_old_z_values,
+                                           old_z_grads,
+                                           old_z_laplacian,
+                                           velocity_values,
+                                           uplift_rates,
+                                           global_max_velocity,
+                                           global_z_range.second - global_z_range.first,
+                                           global_z_average,
+                                           global_entropy_variation,
+                                           substep_size,
+                                           topo_cell->diameter());
 
             cell_matrix = 0;
             cell_rhs = 0;
@@ -1064,28 +1183,27 @@ namespace elaspect
             {
               for (unsigned int k = 0; k < dofs_per_cell; ++k)
               {
-                phi[k]           = topo_fe_values.shape_value(k, q);
-                grad_phi[k]      = topo_fe_values.shape_grad(k, q);
-                laplacian_phi[k] = trace(topo_fe_values.shape_hessian(k, q));
+                phi[k]      = topo_fe_values.shape_value(k, q);
+                grad_phi[k] = topo_fe_values.shape_grad(k, q);
               }
 
+              const double diffusion_constant = std::max(parameters.diffusion_constant,
+                                                         artificial_viscosity);
               const double JxW = topo_fe_values.JxW(q);
+
               for (unsigned int i = 0; i < dofs_per_cell; ++i)
               {
                 cell_rhs(i)
-                += (phi[i] + tau * (velocity_values[q] * grad_phi[i]))
-                   * (old_topo_values[q] + substep_size * uplift_rate_values[q])
-                   * JxW;
+                += phi[i] * (old_z_values[q] + substep_size * uplift_rates[q]) * JxW;
 
                 for (unsigned int j = 0; j < dofs_per_cell; ++j)
                   cell_matrix(i, j)
-                  += ((phi[i] + tau * (velocity_values[q] * grad_phi[i])) *
-                      (phi[j] + substep_size * (velocity_values[q] * grad_phi[j]))
+                  += (phi[i] * phi[j]
                       +
-                      substep_size * eps * 
-                      (grad_phi[i] * grad_phi[j] - 
-                       tau * (velocity_values[q] * grad_phi[i]) * laplacian_phi[j])
-                     ) 
+                      substep_size * 
+                      (phi[i] * (velocity_values[q] * grad_phi[j]) +
+                       diffusion_constant * (grad_phi[i] * grad_phi[j]))
+                     )
                      * JxW;
               }
             }
@@ -1121,6 +1239,7 @@ namespace elaspect
 
           convection_diffusion_constraints.distribute(topography_spatial);
 
+          old_old_topography_spatial = old_topography_spatial;
           old_topography_spatial = topography_spatial;
         }
       }
@@ -1444,7 +1563,7 @@ namespace elaspect
         std::vector<int> send_data_length;
 
         // The data will be reorganized into a single array.
-        std::vector<char> send_data;
+        std::vector<char>send_data;
         std::vector<int> offsets;
 
         // For each vertex of the interface mesh, we need to transfer
@@ -1535,7 +1654,7 @@ namespace elaspect
 
         for (unsigned int i = 0; i < n_vertices; ++i)
         {
-          // Read the index of the vertex.
+   // Read the index of the vertex.
           const unsigned int *index_data = static_cast<const unsigned int *>(recv_data_it);
           const unsigned int vertex_index = *index_data++;
 
@@ -1562,6 +1681,8 @@ namespace elaspect
                                             this->get_parameters().initial_adaptive_refinement;
         surface_mesh.refine_global (max_refinement_level);
 
+        global_Omega_diameter = GridTools::diameter(surface_mesh);
+
         // Get the boundary ids of surface mesh.
         const std::vector<types::boundary_id> 
         surface_mesh_boundary_ids = surface_mesh.get_boundary_ids();
@@ -1581,6 +1702,8 @@ namespace elaspect
           // FE space of topography in spatial coordinates.
           topo_spatial_dof_handler.distribute_dofs(topo_spatial_fe);
           topography_spatial.reinit(topo_spatial_dof_handler.n_dofs());
+          old_topography_spatial.reinit(topo_spatial_dof_handler.n_dofs());
+          old_old_topography_spatial.reinit(topo_spatial_dof_handler.n_dofs());
 
           // Make boundary constraints for the convection-diffusion system.
           // TODO: Only the zero velocity boundaries are taken into account.
@@ -1685,6 +1808,7 @@ namespace elaspect
         }
 
         old_topography_spatial = topography_spatial;
+        old_old_topography_spatial = topography_spatial;
       }
 
 
@@ -1857,6 +1981,18 @@ namespace elaspect
                                  Patterns::Double(0),
                                  "");
 
+              prm.declare_entry ("cR", "0.33",
+                                 Patterns::Double(0),
+                                 "");
+
+              prm.declare_entry ("alpha", "2",
+                                 Patterns::Integer(1,2),
+                                 "");
+
+              prm.declare_entry ("beta", "0.052",
+                                 Patterns::Double(0),
+                                 "");
+
               prm.declare_entry ("Smooth surface mesh", "true",
                                  Patterns::Bool(),
                                  "");
@@ -1891,14 +2027,18 @@ namespace elaspect
           {
             prm.enter_subsection("Convection diffusion");
             {
-              parameters.CFL_number                  = prm.get_double ("CFL number");
-              parameters.diffusion_constant          = prm.get_double ("Diffusion constant");
-              parameters.minimum_substep_number      = prm.get_integer ("Minimum substep number");
+              parameters.CFL_number                  = prm.get_double("CFL number");
+              parameters.diffusion_constant          = prm.get_double("Diffusion constant");
+              parameters.minimum_substep_number      = prm.get_integer("Minimum substep number");
 
-              parameters.smooth_surface_mesh         = prm.get_bool ("Smooth surface mesh");
-              parameters.gradient_descent_iterations = prm.get_integer ("Gradient descent iterations");
-              parameters.gradient_descent_step_size  = prm.get_double ("Gradient descent step size");
-              parameters.slope_limit                 = prm.get_double ("Upper limit of surface slope");
+              parameters.stabilization_c_R           = prm.get_double("cR");
+              parameters.stabilization_alpha         = prm.get_double("alpha");
+              parameters.stabilization_beta          = prm.get_double("beta");
+
+              parameters.smooth_surface_mesh         = prm.get_bool("Smooth surface mesh");
+              parameters.gradient_descent_iterations = prm.get_integer("Gradient descent iterations");
+              parameters.gradient_descent_step_size  = prm.get_double("Gradient descent step size");
+              parameters.slope_limit                 = prm.get_double("Upper limit of surface slope");
             }
             prm.leave_subsection();
           }
