@@ -521,8 +521,7 @@ namespace elaspect
       (introspection.n_components, 
        [&] (const Point<dim> &x) -> Tensor<1,dim>
       {
-        const double dt = time_step / (parameters.convert_to_years ? year_in_seconds : 1);
-        return boundary_velocity_manager.boundary_velocity(p.first, x) * dt;
+        return boundary_velocity_manager.boundary_velocity(p.first, x) * time_step;
       });
 
       std::vector<bool> mask(introspection.component_masks.displacement.size(), false);
