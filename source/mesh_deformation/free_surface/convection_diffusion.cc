@@ -11,6 +11,7 @@
 #include <deal.II/lac/precondition.h>
 #include <deal.II/numerics/vector_tools.h>
 #include <deal.II/numerics/derivative_approximation.h>
+#include <deal.II/numerics/data_out.h>
 
 namespace elaspect
 {
@@ -1214,7 +1215,7 @@ namespace elaspect
                                                                         convection_diffusion_rhs);
           }
 
-          // Solve the linear system with GMRES solver and Jacobi preconditioner.
+          // Solve the linear system with GMRES solver.
           const double rhs_norm = convection_diffusion_rhs.l2_norm();
           
           // Check if the right-hand side is zero.
@@ -1224,9 +1225,6 @@ namespace elaspect
             continue;
           }
 
-          PreconditionJacobi<SparseMatrix<double>> preconditioner;
-          preconditioner.initialize(convection_diffusion_matrix);
-
           SolverControl solver_control(1000, 1e-8 * rhs_norm);
           SolverGMRES<Vector<double>> solver(solver_control);
 
@@ -1235,7 +1233,7 @@ namespace elaspect
           solver.solve(convection_diffusion_matrix,
                        topography_spatial,
                        convection_diffusion_rhs,
-                       preconditioner);
+                       PreconditionIdentity());
 
           convection_diffusion_constraints.distribute(topography_spatial);
 
