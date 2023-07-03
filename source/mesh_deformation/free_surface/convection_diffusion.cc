@@ -1046,7 +1046,7 @@ namespace elaspect
       void 
       ConvectionDiffusion<dim>::compute_topographic_evolution()
       {
-        if (Utilities::MPI::this_mpi_process(surface_mpi_comm) != 0)
+        if (Utilities::MPI::this_mpi_process(this->get_mpi_communicator()) != 0)
           return;
 
         const unsigned int n_substeps = subdivide_time_step();
@@ -1303,7 +1303,7 @@ namespace elaspect
       void
       ConvectionDiffusion<dim>::execute_mesh_smoothing()
       {
-        if (Utilities::MPI::this_mpi_process(surface_mpi_comm) != 0)
+        if (Utilities::MPI::this_mpi_process(this->get_mpi_communicator()) != 0)
           return;
 
         // Update the vertex coordinates of surface mesh.
