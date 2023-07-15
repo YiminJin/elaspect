@@ -32,8 +32,7 @@ namespace elaspect
         {
           if (fe.system_to_component_index(i).first == field0_component)
           {
-            scratch.grad_phi_field[i_field] = scratch.fe_values[field0_extractor].gradient(i, q);
-            scratch.phi_field[i_field]      = scratch.fe_values[field0_extractor].value(i, q);
+            scratch.phi_field[i_field] = scratch.fe_values[field0_extractor].value(i, q);
             ++i_field;
           }
           ++i;
