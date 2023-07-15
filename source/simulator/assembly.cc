@@ -110,7 +110,7 @@ namespace elaspect
                                                cell,
                                                scratch.fe_values.get_quadrature(),
                                                scratch.fe_values.get_mapping(),
-                                               (parameters.constitutive_relation & ConstitutiveRelation::plasticity),
+                                               (!(parameters.constitutive_relation & ConstitutiveRelation::plasticity)),
                                                scratch.material_model_outputs);
 
     // get all dof indices in the current cell, then extract those 
