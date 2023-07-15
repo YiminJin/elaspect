@@ -28,6 +28,10 @@ namespace elaspect
         load_file(const std::string &filename,
                   const MPI_Comm &communicator);
 
+        void 
+        load_netcdf(const std::string &filename, 
+                    const std::vector<std::string> &data_column_names = {});
+
         double
         get_data(const Point<dim> &position,
                  const unsigned int component) const;
