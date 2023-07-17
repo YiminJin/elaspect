@@ -108,6 +108,8 @@ namespace elaspect
 
         bool interpolate_output;
 
+        bool write_higher_order_output;
+
         bool write_in_background_thread;
 
         void set_last_output_time (const double current_time);

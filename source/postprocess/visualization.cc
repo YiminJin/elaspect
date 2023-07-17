@@ -324,6 +324,7 @@ namespace elaspect
       DataOutBase::VtkFlags vtk_flags;
       vtk_flags.cycle = this->get_timestep_number();
       vtk_flags.time = time_in_years_or_seconds;
+      vtk_flags.write_higher_order_cells = write_higher_order_output;
 
       data_out.set_flags(vtk_flags);
 
@@ -927,6 +928,12 @@ namespace elaspect
           }
 
           interpolate_output = prm.get_bool("Interpolate output");
+          write_higher_order_output = prm.get_bool("Write higher order output");
+
+          if (write_higher_order_output)
+            AssertThrow(interpolate_output == true,
+                        ExcMessage("The input parameter 'Postprocess/Visualization/Write higher order output' "
+                                   "requires the input parameter 'Interpolate output' to be set to 'true'."));
 
           // now also see which derived quantities we are to compute
           viz_names = Utilities::split_string_list(prm.get("List of output variables"));
