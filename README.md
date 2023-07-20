@@ -5,7 +5,7 @@ About
 -----
 
 elASPECT is mainly designed for numerical simulation of lithospheric scale deformation.
-I is born out of the well-known mantle convection simulator ASPECT 
+It is born out of the well-known mantle convection simulator ASPECT 
 (https://github.com/geodynamics/aspect), but replaces the Stokes equation by the 
 elasticity-based equilibrium equation in order to capture the elastic response under
 tectonic loads more precisely.

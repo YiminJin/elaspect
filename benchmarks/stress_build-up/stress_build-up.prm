@@ -15,7 +15,7 @@ end
 
 
 subsection Solver parameters
-  subsection Solid system
+  subsection Mechanical system
     set Linear solver scheme = MUMPS
   end
 end

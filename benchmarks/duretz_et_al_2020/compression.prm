@@ -123,7 +123,7 @@ end
 
 
 subsection Solver parameters
-  subsection Solid system
+  subsection Mechanical system
     set Maximum nonlinear iterations = 30
     set Nonlinear solver tolerance   = 1e-6
     set Linear solver scheme         = MUMPS

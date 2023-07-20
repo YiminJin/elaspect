@@ -37,7 +37,7 @@ end
 
 subsection Material model
   set Constitutive relation = elasticity, viscosity, plasticity
-  set Rheological parameters averaging scheme = maximum composition
+  set Rheological parameters averaging scheme = geometric
 
   subsection Basic properties
     set Model name = simple
@@ -105,7 +105,7 @@ end
 
 
 subsection Solver parameters
-  subsection Solid system
+  subsection Mechanical system
     set Maximum nonlinear iterations = 50
     set Nonlinear solver tolerance   = 1e-6
     set Linear solver scheme         = MUMPS
