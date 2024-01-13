@@ -1,4 +1,4 @@
-set Additional shared libraries = /home/jinym/Documents/data/elaspect_tests/strip_footing/ale/libstrip_footing.so
+set Additional shared libraries = /path/to/libstrip_footing.so
 set Dimension                               = 2
 set Output directory                        = output
 set Use years in output instead of seconds  = false
@@ -103,7 +103,7 @@ end
 
 
 subsection Time stepping
-  set List of model names = function
+  set List of model names = function, convection time step
 
   subsection Function
     set Function expression = 1

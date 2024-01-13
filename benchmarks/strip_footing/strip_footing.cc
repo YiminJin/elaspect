@@ -19,6 +19,8 @@ namespace elaspect
 
         double maximal_depth () const override;
 
+        double height_above_reference_surface(const Point<dim> &position) const override;
+
         std::set<types::boundary_id>
         get_used_boundary_indicators () const override;
 
@@ -136,6 +138,14 @@ namespace elaspect
     StripFooting<dim>::maximal_depth () const
     {
       return extents[dim-1];
+    }
+
+
+    template <int dim>
+    double
+    StripFooting<dim>::height_above_reference_surface(const Point<dim> &position) const
+    {
+      return extents[dim-1] - position[dim-1];
     }
 
 
