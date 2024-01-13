@@ -373,7 +373,7 @@ namespace elaspect
           for (const auto bid : boundary_ids)
             VectorTools::interpolate_boundary_values(dof_handler, 
                                                      bid, 
-                                                     ZeroFunction<1>(1),
+                                                     Functions::ZeroFunction<1>(1),
                                                      constraints);
           constraints.close();
         }
@@ -1269,7 +1269,7 @@ namespace elaspect
       unsigned int
       ConvectionDiffusion<dim>::subdivide_time_step() const
       {
-        const QIterated<surface_dim> quadrature_formula(QTrapez<1>(),
+        const QIterated<surface_dim> quadrature_formula(QTrapezoid<1>(),
                                                         surface_vel_fe->degree);
         FEValues<surface_dim> fe_values(*surface_vel_fe, quadrature_formula, update_values);
         FEValuesExtractors::Vector u_extractor(0);
@@ -1931,11 +1931,13 @@ namespace elaspect
               {
                 // Hard coding: the d-th DoF of the v-th vertex is the 
                 // (v * dim + d)-th DoF of the face.
+                // TODO: the newest version of deal.II has replaced the three boolean arguments
+                // of function face_to_cell_index() that determine the orientation of the face
+                // by a char type argument that combines the booleans, but I haven't figured out
+                // how to get the combined orientation. For now, I simply pass the default value
+                // to the function, but it may be wrong for some geometry models other than box.
                 const types::global_dof_index dof_index =
-                  cell_dof_indices[mesh_deformation_fe.face_to_cell_index(v * dim + d, face_no,
-                                                                          volume_cell->face_orientation(face_no),
-                                                                          volume_cell->face_flip(face_no),
-                                                                          volume_cell->face_rotation(face_no))];
+                  cell_dof_indices[mesh_deformation_fe.face_to_cell_index(v * dim + d, face_no)];
 
                 if (d < surface_dim)
                 {
