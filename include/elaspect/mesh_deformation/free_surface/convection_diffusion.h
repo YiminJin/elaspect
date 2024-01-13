@@ -59,9 +59,8 @@ namespace elaspect
           void 
           declare_parameters(ParameterHandler &prm);
 
-          virtual 
           void
-          parse_parameters(ParameterHandler &prm);
+          parse_parameters(ParameterHandler &prm) override;
 
         private:
           static const unsigned int surface_dim = dim - 1;
