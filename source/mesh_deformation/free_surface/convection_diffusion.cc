@@ -1937,7 +1937,16 @@ namespace elaspect
                 // how to get the combined orientation. For now, I simply pass the default value
                 // to the function, but it may be wrong for some geometry models other than box.
                 const types::global_dof_index dof_index =
-                  cell_dof_indices[mesh_deformation_fe.face_to_cell_index(v * dim + d, face_no)];
+                  cell_dof_indices[mesh_deformation_fe.face_to_cell_index(
+                    v * dim + d, face_no,
+#if DEAL_II_VERSION_GTE(9,6,0)
+                    volume_cell->combined_face_orientation(face_no)
+#else
+                    volume_cell->face_orientation(face_no),
+                    volume_cell->face_flip(face_no),
+                    volume_cell->face_rotation(face_no)
+#endif
+                  )];
 
                 if (d < surface_dim)
                 {
