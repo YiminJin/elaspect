@@ -18,6 +18,8 @@ namespace elaspect
 
         double maximal_depth() const override;
 
+        double height_above_reference_surface(const Point<dim> &position) const override;
+
         std::set<types::boundary_id>
         get_used_boundary_indicators() const override;
 
@@ -185,6 +187,14 @@ namespace elaspect
     double SlopeStability<dim>::maximal_depth() const
     {
       return 5.;
+    }
+
+
+    template <int dim>
+    double
+    SlopeStability<dim>::height_above_reference_surface(const Point<dim> &position) const
+    {
+      return 10 - position[dim-1];
     }
 
 
