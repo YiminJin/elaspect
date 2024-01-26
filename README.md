@@ -21,3 +21,10 @@ elASPECT is configured using CMake and has the following requirements:
   - MPI, Trilinos, p4est (required)
   - BLAS/LAPACK, zlib (strongly recommended)
   - HDF5 (optional)
+
+
+Note
+----
+
+elASPECT cannot be compiled with deal.II 9.5 because of a bug in that released version.
+The bug has now been fixed in the master branch of deal.II.
