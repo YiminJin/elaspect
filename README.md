@@ -17,14 +17,7 @@ Installation instructions
 elASPECT is configured using CMake and has the following requirements:
 - CMake 3.1.0
 - GCC with C++14 support
-- [deal.II](https://github.com/dealii/dealii) 9.4 or newer configured with:
+- [deal.II](https://github.com/dealii/dealii) 9.4.1 configured with:
   - MPI, Trilinos, p4est (required)
   - BLAS/LAPACK, zlib (strongly recommended)
   - HDF5 (optional)
-
-
-Note
-----
-
-elASPECT cannot be compiled with deal.II 9.5 because of a bug in that released version.
-The bug has now been fixed in the master branch of deal.II.
