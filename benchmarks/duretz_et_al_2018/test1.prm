@@ -2,6 +2,7 @@ set Dimension                               = 2
 set Output directory                        = output_test1
 set Use years in output instead of seconds  = false
 set End time                                = 50e10
+set Use ALE method                          = true
 set Timing output frequency                 = 5
 
 
@@ -108,7 +109,7 @@ end
 
 subsection Time stepping
   set First time step size = 1e10
-  set List of model names = function
+  set List of model names = function, convection time step
 
   subsection Function
     set Function expression = 1e10

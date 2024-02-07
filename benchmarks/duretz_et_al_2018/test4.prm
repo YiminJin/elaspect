@@ -1,7 +1,8 @@
 set Dimension                               = 2
 set Output directory                        = output_test4
 set Use years in output instead of seconds  = false
-set End time                                = 200e10
+set End time                                = 100e10
+set Use ALE method                          = true
 set Timing output frequency                 = 5
 
 
@@ -116,7 +117,7 @@ end
 
 subsection Time stepping
   set First time step size = 1e10
-  set List of model names = function
+  set List of model names = function, convection time step
 
   subsection Function
     set Function expression = 1e10
@@ -129,6 +130,6 @@ subsection Postprocess
   
   subsection Visualization
     set List of output variables = strain rate
-    set Time between graphical output = 5e10
+    set Time between graphical output = 2e10
   end
 end
